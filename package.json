@@ -1,0 +1,17 @@
+{
+  "name": "ticket-mgmt",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-tenant ticket management app (see DESIGN.md)",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "dev": "npm run dev --workspace backend & npm run dev --workspace frontend",
+    "dev:backend": "npm run dev --workspace backend",
+    "dev:frontend": "npm run dev --workspace frontend"
+  }
+}

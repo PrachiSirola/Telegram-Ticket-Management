@@ -1,0 +1,285 @@
+// Ticket Management — multi-organisation data model.
+// Hierarchy: Organization → Project → Ticket. Each org is fully isolated and
+// has exactly ONE Super Admin (enforced by a partial unique index in the init
+// migration). One user account can belong to many orgs with a role per org.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// Role of a user *within* an organisation.
+enum OrgRole {
+  SUPER_ADMIN
+  ADMIN
+  DEVELOPER
+  CLIENT
+}
+
+// Roles an invite can carry. SUPER_ADMIN is deliberately absent — the only SA
+// is the org creator (or via ownership transfer), never via invite.
+enum InviteRole {
+  ADMIN
+  DEVELOPER
+  CLIENT
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketType {
+  BUG
+  FEATURE
+  TASK
+}
+
+enum CommentVisibility {
+  INTERNAL
+  CLIENT_VISIBLE
+}
+
+enum NotificationType {
+  ASSIGNED
+  STATUS_CHANGED
+  COMMENTED
+  MENTIONED
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String // bcrypt; every account is email/password
+  avatarUrl    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships     OrgMembership[]
+  reportedTickets Ticket[]             @relation("Reporter")
+  assignedTickets Ticket[]             @relation("Assignee")
+  comments        Comment[]
+  notifications   Notification[]
+  sentInvites     Invite[]             @relation("InvitedBy")
+  attachments     Attachment[]
+  passwordResets  PasswordResetToken[]
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Per-org Telegram notifications (configured by the Super Admin). When
+  // unset, telegram sends fall back to console logs.
+  telegramBotToken String?
+  telegramChatId   String?
+
+  memberships OrgMembership[]
+  projects    Project[]
+  invites     Invite[]
+}
+
+model OrgMembership {
+  id        String   @id @default(cuid())
+  userId    String
+  orgId     String
+  role      OrgRole
+  disabled  Boolean  @default(false) // per-org deactivation; account stays valid elsewhere
+  createdAt DateTime @default(now())
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  projectAccess ProjectClient[]
+
+  @@unique([userId, orgId])
+  @@index([userId])
+  @@index([orgId])
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  orgId       String
+  name        String
+  description String   @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  org     Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  tickets Ticket[]
+  clients ProjectClient[]
+
+  @@index([orgId])
+}
+
+// Attaches a CLIENT membership to a project. Clients only see projects they
+// are attached to; internal roles (SA/ADMIN/DEVELOPER) see all org projects.
+model ProjectClient {
+  id           String   @id @default(cuid())
+  projectId    String
+  membershipId String
+  createdAt    DateTime @default(now())
+
+  project    Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  membership OrgMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, membershipId])
+  @@index([membershipId])
+}
+
+model Invite {
+  id          String       @id @default(cuid())
+  email       String
+  orgId       String
+  role        InviteRole
+  // For CLIENT invites: projects to attach on acceptance. Always re-validated
+  // against the invite's org when consumed (cross-org leak guard).
+  projectIds  String[]     @default([])
+  token       String       @unique
+  status      InviteStatus @default(PENDING)
+  invitedById String
+  expiresAt   DateTime
+  createdAt   DateTime     @default(now())
+
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  invitedBy User         @relation("InvitedBy", fields: [invitedById], references: [id])
+
+  @@index([email])
+  @@index([orgId])
+}
+
+// Pending open-signup: org + account are only created after the emailed OTP
+// is verified, so unverified junk never lands in User/Organization.
+model PendingSignup {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  orgName      String
+  name         String
+  passwordHash String
+  codeHash     String // sha256 of the 6-digit OTP
+  attempts     Int      @default(0)
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+}
+
+// One-time tokens for the "forgot password" flow. We store only a SHA-256 hash
+// of the token; the raw token lives only in the emailed reset link.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Ticket {
+  id          String         @id @default(cuid())
+  projectId   String
+  title       String
+  description String         @default("")
+  status      TicketStatus   @default(OPEN)
+  priority    TicketPriority @default(MEDIUM)
+  type        TicketType     @default(TASK)
+  assigneeId  String?
+  reporterId  String
+  dueDate     DateTime?
+  estimate    Float? // hours
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee      User?          @relation("Assignee", fields: [assigneeId], references: [id])
+  reporter      User           @relation("Reporter", fields: [reporterId], references: [id])
+  comments      Comment[]
+  notifications Notification[]
+  attachments   Attachment[]
+
+  @@index([projectId, status])
+  @@index([assigneeId])
+}
+
+model Comment {
+  id         String            @id @default(cuid())
+  ticketId   String
+  authorId   String
+  parentId   String?
+  body       String
+  visibility CommentVisibility @default(INTERNAL)
+  createdAt  DateTime          @default(now())
+
+  ticket      Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author      User         @relation(fields: [authorId], references: [id])
+  parent      Comment?     @relation("Thread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies     Comment[]    @relation("Thread")
+  attachments Attachment[]
+
+  @@index([ticketId])
+}
+
+model Attachment {
+  id         String            @id @default(cuid())
+  ticketId   String
+  commentId  String? // set when the file was attached to a comment
+  uploaderId String
+  filename   String
+  mimeType   String
+  size       Int
+  storageKey String // relative path on disk (or object key once on S3)
+  visibility CommentVisibility @default(CLIENT_VISIBLE)
+  createdAt  DateTime          @default(now())
+
+  ticket   Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  comment  Comment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  uploader User     @relation(fields: [uploaderId], references: [id])
+
+  @@index([ticketId])
+  @@index([commentId])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  ticketId  String
+  isRead    Boolean          @default(false)
+  payload   Json?
+  createdAt DateTime         @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+}

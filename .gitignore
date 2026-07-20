@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+.next/
+out/
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
+
+# Playwright artifacts
+.playwright-mcp/
+*.png
+
+# Uploaded files
+backend/uploads/

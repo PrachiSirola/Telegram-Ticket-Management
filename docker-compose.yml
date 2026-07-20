@@ -1,0 +1,31 @@
+services:
+  # Local fake inbox: catches ALL outgoing mail (OTPs, reset links).
+  # Web UI: http://localhost:8025 · SMTP: localhost:1025
+  mailpit:
+    image: axllent/mailpit
+    container_name: ticket-mgmt-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025" # SMTP
+      - "8025:8025" # Web UI + API
+
+  db:
+    image: postgres:16-alpine
+    container_name: ticket-mgmt-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ticket
+      POSTGRES_PASSWORD: ticket
+      POSTGRES_DB: ticket_mgmt
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticket -d ticket_mgmt"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

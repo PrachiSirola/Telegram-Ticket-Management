@@ -1,0 +1,164 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===========================================================================
+   Magpie-inspired design tokens — editorial sage & cream, sharp corners,
+   hairline borders, no shadows, restrained palette. Tokens only; never
+   hard-code hex in components.
+   =========================================================================== */
+:root {
+  --bg: #f5f0e8;          /* cream page */
+  --surface: #e8efe2;     /* pale sage (grouped/subtle surfaces) */
+  --accent: #dce5d4;      /* sage accent */
+  --fg: #2d3a2a;          /* deep green text */
+  --fg-soft: #3a4a37;     /* secondary text */
+  --muted: rgba(45, 58, 42, 0.55);
+
+  /* border-opacity ladder (deep green at low alpha) */
+  --line: rgba(45, 58, 42, 0.10);        /* dividers */
+  --card-border: rgba(45, 58, 42, 0.15); /* cards */
+  --input-border: rgba(45, 58, 42, 0.22);/* inputs */
+
+  /* restrained semantic accents */
+  --ok: #2f6b3a;     --ok-bg: #dbe7d2;     /* success / done */
+  --warn: #876a17;   --warn-bg: #efe6cf;   /* warning / in-progress / internal */
+  --danger: #a8352a; --danger-bg: #f1ddd8; /* danger / urgent / blocked */
+}
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::placeholder { color: var(--muted); }
+  ::selection { background: var(--accent); }
+}
+
+@layer components {
+  /* --- Eyebrow / metadata label (uppercase, tracked) --- */
+  .eyebrow {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+  }
+
+  /* --- Surfaces --- */
+  .card { background: var(--bg); border: 1px solid var(--card-border); }
+  .card-subtle { background: var(--surface); border: 1px solid var(--card-border); }
+  .card-inverted { background: var(--fg); color: var(--bg); }
+  .divide-line > * + * { border-top: 1px solid var(--line); }
+
+  /* --- Buttons (sharp, no shadow) --- */
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 500; line-height: 1;
+    padding: 10px 18px; border: 1px solid transparent; cursor: pointer;
+    transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn:not(:disabled):hover { transform: translateY(-1px); }
+  .btn-primary { background: var(--fg); color: var(--bg); }
+  .btn-secondary { background: transparent; color: var(--fg); border-color: var(--fg); }
+  .btn-secondary:not(:disabled):hover { background: var(--accent); }
+  .btn-danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+  .btn-danger:not(:disabled):hover { background: var(--danger-bg); }
+  .btn-sm { padding: 7px 12px; font-size: 13px; }
+  .btn-block { width: 100%; justify-content: center; }
+  .link {
+    background: none; border: 0; padding: 0; cursor: pointer;
+    color: var(--fg); font: inherit; font-weight: 500; text-decoration: underline;
+    text-underline-offset: 3px; text-decoration-thickness: 1px;
+  }
+  .link:hover { color: var(--fg-soft); }
+  .link-danger { color: var(--danger); }
+
+  /* --- Inputs (transparent, hairline, border darkens on focus) --- */
+  .input {
+    width: 100%; font: inherit; font-size: 14px; color: var(--fg);
+    background: transparent; border: 1px solid var(--input-border);
+    padding: 9px 12px; outline: none; transition: border-color 0.15s ease;
+  }
+  .input:focus { border-color: var(--fg); }
+  select.input { -webkit-appearance: none; appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--fg-soft) 50%),
+                      linear-gradient(135deg, var(--fg-soft) 50%, transparent 50%);
+    background-position: calc(100% - 16px) 52%, calc(100% - 11px) 52%;
+    background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 30px; }
+
+  /* --- Badges (pills become squared chips per sharp-corner principle) --- */
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+    text-transform: uppercase; padding: 3px 8px; line-height: 1.5;
+    border: 1px solid transparent;
+  }
+  .badge .dot { width: 6px; height: 6px; flex: 0 0 auto; }
+  .b-neutral { background: transparent; color: var(--muted); border-color: var(--card-border); }
+  .b-sage    { background: var(--surface); color: var(--fg-soft); }
+  .b-ok      { background: var(--ok-bg); color: var(--ok); }
+  .b-warn    { background: var(--warn-bg); color: var(--warn); }
+  .b-danger  { background: var(--danger-bg); color: var(--danger); }
+  .b-outline-ok     { background: transparent; color: var(--ok); border-color: var(--ok); }
+  .b-outline-danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+  .b-outline-muted  { background: transparent; color: var(--muted); border-color: var(--card-border); }
+
+  /* --- Dropdown (custom select) --- */
+  .dd-trigger {
+    display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
+    width: 100%; font: inherit; font-size: 14px; color: var(--fg);
+    background: transparent; border: 1px solid var(--input-border);
+    padding: 9px 12px; cursor: pointer; transition: border-color 0.15s ease;
+  }
+  .dd-trigger:hover:not(:disabled) { border-color: var(--fg-soft); }
+  .dd-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+  .dd-trigger.open { border-color: var(--fg); }
+  .dd-trigger.sm { padding: 6px 10px; font-size: 13px; }
+  .dd-chevron { flex-shrink: 0; color: var(--fg-soft); transition: transform 0.15s ease; }
+  .dd-trigger.open .dd-chevron { transform: rotate(180deg); }
+  .dd-menu {
+    background: var(--bg); border: 1px solid var(--card-border);
+    max-height: 256px; overflow: auto;
+  }
+  .dd-option {
+    display: block; width: 100%; text-align: left; font: inherit; font-size: 14px;
+    color: var(--fg); background: transparent; border: 0; padding: 8px 12px; cursor: pointer;
+  }
+  .dd-option:hover:not(:disabled) { background: var(--accent); }
+  .dd-option.selected { background: var(--surface); font-weight: 500; }
+  .dd-option:disabled { color: var(--muted); cursor: default; }
+
+  /* --- Mention (@Name inside comment/description text) --- */
+  .mention {
+    color: var(--ok);
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  /* --- Avatar (square, sharp) --- */
+  .avatar {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--fg); color: var(--bg); font-weight: 600; flex: 0 0 auto;
+  }
+
+  /* --- Alerts (left-border accent) --- */
+  .alert { border-left: 3px solid var(--card-border); padding: 12px 14px; background: var(--surface); }
+  .alert-ok { border-left-color: var(--ok); background: var(--ok-bg); }
+  .alert-danger { border-left-color: var(--danger); background: var(--danger-bg); color: var(--danger); }
+}
+
+/* --- Motion: subtle only, honor reduced-motion --- */
+@keyframes tm-spin { to { transform: rotate(360deg); } }
+@keyframes tm-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.spin { animation: tm-spin 0.8s linear infinite; }
+.pulse { animation: tm-pulse 1.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
