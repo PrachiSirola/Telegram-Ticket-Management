@@ -1,6 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
-import { IconHome, IconUsers, IconSettings, IconUser, IconTicket } from "../Icons";
-
+import { IconHome, IconUsers, IconSettings, IconUser } from "../Icons";
 type SidebarProps = {
   admin: boolean;
 };
