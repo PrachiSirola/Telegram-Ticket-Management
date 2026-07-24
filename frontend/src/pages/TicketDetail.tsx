@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { isAdminOrAboveIn, isInternalIn, useAuth } from "../auth";
@@ -13,6 +13,7 @@ import {
   extractMentionIds,
   type MentionMember,
 } from "../components/MentionTextarea";
+import { IconUpload, IconTrash } from "../components/Icons";
 import type { Comment, CommentAttachment, CommentVisibility } from "../types";
 
 export default function TicketDetail() {
@@ -77,7 +78,18 @@ export default function TicketDetail() {
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_280px]">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">{ticket.title}</h1>
+        {/* Breadcrumb */}
+        {ticket.project && (
+          <div className="mb-3 text-sm text-muted">
+            <Link to={`/projects/${ticket.projectId}`} className="link text-sm">
+              {ticket.project.name}
+            </Link>
+            <span className="mx-1.5">›</span>
+            <span className="text-fg-soft">Ticket</span>
+          </div>
+        )}
+
+        <h1 className="text-2xl font-bold tracking-tight text-fg">{ticket.title}</h1>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <StatusBadge status={ticket.status} />
           <PriorityBadge priority={ticket.priority} />
@@ -111,7 +123,7 @@ export default function TicketDetail() {
       </div>
 
       <aside className="space-y-4">
-        <div className="card p-4 text-sm">
+        <div className="card p-5 text-sm">
           <Field label="Reporter">
             {ticket.reporter && (
               <span className="flex items-center gap-2">
@@ -192,6 +204,7 @@ export default function TicketDetail() {
             onClick={() => setConfirmingDelete(true)}
             className="btn btn-danger btn-sm btn-block"
           >
+            <IconTrash size={14} />
             Delete ticket
           </button>
         )}
@@ -202,7 +215,7 @@ export default function TicketDetail() {
         title="Delete ticket?"
         message={
           <>
-            This will permanently delete <span className="font-medium">“{ticket.title}”</span> and
+            This will permanently delete <span className="font-medium">"{ticket.title}"</span> and
             all of its comments and attachments.
           </>
         }
@@ -305,10 +318,10 @@ function CommentCard({
   ];
 
   return (
-    <div className={internal ? "alert alert-ok" : "card p-3"} style={internal ? {} : undefined}>
-      <div className="mb-1 flex items-center gap-2">
-        <Avatar name={comment.author.name} url={comment.author.avatarUrl} size={22} />
-        <span className="text-sm font-medium">{comment.author.name}</span>
+    <div className={internal ? "alert alert-ok" : "card p-4"} style={internal ? {} : undefined}>
+      <div className="mb-1.5 flex items-center gap-2">
+        <Avatar name={comment.author.name} url={comment.author.avatarUrl} size={24} />
+        <span className="text-sm font-semibold text-fg">{comment.author.name}</span>
         {internal && <span className="badge b-warn">Internal</span>}
         <span className="ml-auto text-[11px] text-muted">
           {new Date(comment.createdAt).toLocaleString()}
@@ -378,14 +391,14 @@ function CommentImage({ att }: { att: CommentAttachment }) {
   }, [att.id]);
 
   if (!url) {
-    return <div className="h-28 w-36 animate-pulse rounded border border-card-border bg-surface" />;
+    return <div className="h-28 w-36 rounded-lg border border-card-border bg-accent pulse" />;
   }
   return (
     <a href={url} target="_blank" rel="noreferrer" title={att.filename}>
       <img
         src={url}
         alt={att.filename}
-        className="h-28 max-w-56 rounded border border-card-border object-cover"
+        className="h-28 max-w-56 rounded-lg border border-card-border object-cover transition-shadow hover:shadow-elevated"
       />
     </a>
   );
@@ -447,7 +460,7 @@ function CommentForm({
   }
 
   return (
-    <div className="card p-3">
+    <div className="card p-4">
       <MentionTextarea
         rows={3}
         placeholder="Write a comment… (@ to mention)"
@@ -463,7 +476,7 @@ function CommentForm({
           ))}
         </div>
       )}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         {canPostInternal && (
           <Dropdown
             className="w-52"
@@ -477,9 +490,10 @@ function CommentForm({
           />
         )}
         <label
-          className={`btn btn-primary btn-sm ${images.length >= MAX_IMAGES ? "opacity-50" : "cursor-pointer"}`}
+          className={`btn btn-secondary btn-sm ${images.length >= MAX_IMAGES ? "opacity-50" : "cursor-pointer"}`}
         >
-          Upload Image
+          <IconUpload size={14} />
+          Attach images
           <input
             type="file"
             accept="image/*"
@@ -518,17 +532,16 @@ function ImagePreview({ file, onRemove }: { file: File; onRemove: () => void }) 
           src={url}
           alt={file.name}
           title={file.name}
-          className="h-20 w-24 rounded border border-card-border object-cover"
+          className="h-20 w-24 rounded-lg border border-card-border object-cover"
         />
       )}
       <button
         onClick={onRemove}
         title="Remove"
-        className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-card-border bg-bg text-xs leading-none hover:text-danger"
+        className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-card-border bg-white text-xs leading-none text-muted hover:text-danger"
       >
         ×
       </button>
     </div>
   );
 }
-

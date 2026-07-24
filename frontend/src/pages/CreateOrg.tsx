@@ -34,45 +34,105 @@ export default function CreateOrg() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
-      <div className="card w-96 p-7">
-        <div className="eyebrow mb-3">Ticket Management</div>
-        <h1 className="text-2xl font-bold tracking-tight">
-          {firstOrg ? "You're not in any organisation." : "New organisation."}
-        </h1>
-        <p className="mb-6 mt-1 text-sm text-fg-soft">
-          {firstOrg
-            ? "Create one to get started (you'll be its Super Admin), or ask an administrator for an invite link."
-            : "You'll be the new organisation's Super Admin."}
-        </p>
+    <div className="relative flex min-h-[calc(100vh-8rem)] items-center justify-center overflow-hidden rounded-2xl px-4">
 
-        <form onSubmit={submit} className="grid gap-3">
-          <input
-            className="input"
-            type="text"
-            placeholder="Organisation name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-            maxLength={100}
-          />
-          <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
-            {busy ? "Creating…" : "Create organisation"}
-          </button>
-        </form>
+      {/* Background image — no color tint, just soft blur */}
+      <div
+        className="absolute inset-0 z-0"
+        style={{
+          backgroundImage: 'url(/backgroundimage.jpeg)',
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          filter: 'blur(10px) brightness(0.8)',
+          transform: 'scale(1.04)',
+        }}
+      />
 
-        {err && <p className="mt-3 text-sm text-danger">{err}</p>}
+      {/* Neutral semi-transparent overlay — no color, just darken edges */}
+      <div
+        className="absolute inset-0 z-[1]"
+        style={{
+          background: 'radial-gradient(ellipse at center, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0.15) 60%, rgba(0,0,0,0.1) 100%)',
+        }}
+      />
 
-        <p className="mt-5 text-center text-sm text-fg-soft">
+      {/* Content */}
+      <div className="relative z-10 w-full max-w-md">
+
+        {/* Brand mark */}
+        <div className="mb-8 text-center">
+          <div
+            className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl text-2xl font-bold text-white shadow-elevated"
+            style={{ background: 'var(--gradient-brand)' }}
+          >
+            T
+          </div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fg-soft">
+            Ticket Management
+          </p>
+        </div>
+
+        {/* Glass card */}
+        <div
+          className="overflow-hidden rounded-2xl border border-white/30 p-8 shadow-dropdown"
+          style={{
+            background: 'rgba(255,255,255,0.88)',
+            backdropFilter: 'blur(24px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+          }}
+        >
+          <h1
+            className="text-2xl font-bold tracking-tight text-fg"
+            style={{ fontFamily: 'var(--font-display)' }}
+          >
+            {firstOrg ? "You're not in any organisation" : "New organisation"}
+          </h1>
+          <p className="mb-6 mt-2 text-sm leading-relaxed text-fg-soft">
+            {firstOrg
+              ? "Create one to get started — you'll be its Super Admin. Or ask an administrator for an invite link."
+              : "You'll be the new organisation's Super Admin."}
+          </p>
+
+          <form onSubmit={submit} className="grid gap-5">
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-fg-soft">
+                Organisation name
+              </label>
+              <input
+                className="input"
+                type="text"
+                placeholder="Acme Inc."
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                maxLength={100}
+                autoFocus
+              />
+            </div>
+            <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
+              {busy ? "Creating…" : "Create organisation"}
+            </button>
+          </form>
+
+          {err && <p className="mt-3 text-sm text-danger">{err}</p>}
+        </div>
+
+        <p className="mt-6 text-center text-sm font-medium text-fg-soft">
           {firstOrg ? (
             <>
               Signed in as {me?.email} ·{" "}
-              <button className="link" onClick={() => logout()}>
+              <button
+                className="font-semibold text-primary underline underline-offset-2 hover:text-primary-hover"
+                onClick={() => logout()}
+              >
                 Log out
               </button>
             </>
           ) : (
-            <button className="link" onClick={() => navigate(-1)}>
+            <button
+              className="font-semibold text-primary underline underline-offset-2 hover:text-primary-hover"
+              onClick={() => navigate(-1)}
+            >
               Cancel
             </button>
           )}

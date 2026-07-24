@@ -6,6 +6,7 @@ import { isAdminOrAboveIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
 import { Dropdown } from "../components/Dropdown";
+import { IconPlus } from "../components/Icons";
 import {
   MentionTextarea,
   extractMentionIds,
@@ -50,18 +51,19 @@ export default function Project() {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_280px]">
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
       <div>
         <div className="mb-5 flex items-center justify-between">
           <div>
             <div className="eyebrow mb-1">Project</div>
-            <h1 className="text-2xl font-bold tracking-tight">{project?.name ?? "Project"}</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-fg">{project?.name ?? "Project"}</h1>
             {project?.description && (
               <p className="mt-1 text-sm text-fg-soft">{project.description}</p>
             )}
           </div>
           <button onClick={() => setShowForm((s) => !s)} className="btn btn-primary btn-sm">
-            {showForm ? "Cancel" : "+ New Ticket"}
+            <IconPlus size={15} />
+            {showForm ? "Cancel" : "New Ticket"}
           </button>
         </div>
 
@@ -96,10 +98,10 @@ export default function Project() {
           ))}
         </div>
 
-        <div className="card divide-line">
+        <div className="card divide-line overflow-hidden">
           {isLoading && <div className="p-6 text-sm text-muted">Loading…</div>}
           {tickets?.length === 0 && (
-            <div className="p-8 text-center text-sm text-muted">No tickets.</div>
+            <div className="p-10 text-center text-sm text-muted">No tickets.</div>
           )}
           {tickets?.map((t) => (
             <TicketRow key={t.id} ticket={t} />
@@ -108,7 +110,7 @@ export default function Project() {
       </div>
 
       <aside className="space-y-4">
-        <div className="card p-4">
+        <div className="card p-5">
           <div className="eyebrow mb-3">Team</div>
           <ul className="space-y-3 text-sm">
             {members?.map((m) => (
@@ -120,13 +122,13 @@ export default function Project() {
                     className="h-8 w-8 shrink-0 rounded-full object-cover"
                   />
                 ) : (
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-fg/10 text-xs font-medium uppercase text-fg-soft">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-semibold uppercase text-primary">
                     {m.name.charAt(0)}
                   </span>
                 )}
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-fg">{m.name}</div>
-                  <div className="truncate text-xs text-fg-soft">{m.email}</div>
+                  <div className="truncate font-medium text-fg">{m.name}</div>
+                  <div className="truncate text-[11px] text-muted">{m.email}</div>
                 </div>
                 <span className="eyebrow shrink-0">
                   {m.role === "SUPER_ADMIN" ? "Owner" : m.role.toLowerCase()}
@@ -179,14 +181,14 @@ function NewTicketForm({
   const mentionables: MentionMember[] = members.map((m) => ({ id: m.userId, name: m.name }));
 
   return (
-    <div className="card mb-4 p-4">
+    <div className="card mb-4 p-5">
       <input
-        className="input mb-2"
+        className="input mb-3"
         placeholder="Title"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
       />
-      <div className="mb-2">
+      <div className="mb-3">
         <MentionTextarea
           placeholder="Description (@ to mention)"
           rows={3}
@@ -196,7 +198,7 @@ function NewTicketForm({
           onMention={(m) => setPicked((prev) => [...prev, m])}
         />
       </div>
-      <div className="mb-3 flex flex-wrap gap-2">
+      <div className="mb-4 flex flex-wrap gap-2">
         <Dropdown
           className="w-36"
           value={type}

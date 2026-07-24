@@ -27,15 +27,15 @@ export function Modal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(45,58,42,0.45)" }}
+      style={{ background: "rgba(15, 23, 42, 0.5)", backdropFilter: "blur(4px)" }}
       onMouseDown={onClose}
     >
       <div
-        className="card w-full p-5"
+        className="w-full overflow-hidden rounded-2xl border border-card-border bg-white p-6 shadow-dropdown"
         style={{ maxWidth: width }}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-3 text-lg font-bold tracking-tight">{title}</h2>
+        <h2 className="mb-4 text-lg font-bold tracking-tight text-fg">{title}</h2>
         {children}
       </div>
     </div>

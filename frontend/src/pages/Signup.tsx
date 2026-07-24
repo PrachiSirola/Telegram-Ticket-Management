@@ -58,108 +58,88 @@ export default function Signup() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
-      <div className="card w-96 p-7">
-        <div className="eyebrow mb-3">Ticket Management</div>
+    <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 overflow-hidden">
+        <div className="pointer-events-none absolute inset-0" style={{ backgroundImage: "url(/backgroundimage2.jpeg)", backgroundSize: "cover", backgroundPosition: "center", opacity: 0.15, filter: "blur(1.5px) saturate(1.5)" }} />
+      <div className="relative z-10 w-full max-w-sm">
+        <div className="mb-8 text-center">
+          <div
+            className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl text-xl font-bold text-white"
+            style={{ background: 'var(--gradient-brand)' }}
+          >
+            T
+          </div>
+          <div className="eyebrow">Ticket Management</div>
+        </div>
 
-        {step === "form" ? (
-          <>
-            <h1 className="text-2xl font-bold tracking-tight">Create your organisation.</h1>
-            <p className="mb-6 mt-1 text-sm text-fg-soft">
-              You'll be the organisation's Super Admin.
-            </p>
-            <form onSubmit={submitForm} className="grid gap-3">
-              <input
-                className="input"
-                type="text"
-                placeholder="Organisation name"
-                value={orgName}
-                onChange={(e) => setOrgName(e.target.value)}
-                required
-                maxLength={100}
-              />
-              <input
-                className="input"
-                type="text"
-                placeholder="Your full name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                autoComplete="name"
-              />
-              <input
-                className="input"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoComplete="email"
-              />
-              <input
-                className="input"
-                type="password"
-                placeholder="Password (min. 8 characters)"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                minLength={8}
-                autoComplete="new-password"
-              />
-              <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
-                {busy ? "Sending code…" : "Continue"}
-              </button>
-            </form>
-          </>
-        ) : (
-          <>
-            <h1 className="text-2xl font-bold tracking-tight">Check your email.</h1>
-            <p className="mb-6 mt-1 text-sm text-fg-soft">{info}</p>
-            <form onSubmit={submitOtp} className="grid gap-3">
-              <input
-                className="input text-center text-2xl tracking-[0.5em]"
-                type="text"
-                inputMode="numeric"
-                placeholder="000000"
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                required
-                autoFocus
-              />
-              <button
-                type="submit"
-                className="btn btn-primary btn-block"
-                disabled={busy || code.length !== 6}
-              >
-                {busy ? "Verifying…" : "Verify & create organisation"}
-              </button>
-            </form>
-            <p className="mt-4 text-center text-sm text-fg-soft">
-              Didn't get it?{" "}
-              <button className="link" onClick={resend}>
-                Resend code
-              </button>
-              {" · "}
-              <button
-                className="link"
-                onClick={() => {
-                  setStep("form");
-                  setErr(null);
-                }}
-              >
-                Edit details
-              </button>
-            </p>
-          </>
-        )}
+        <div className="card p-8">
+          {step === "form" ? (
+            <>
+              <h1 className="text-2xl font-bold tracking-tight text-fg">Create your organisation</h1>
+              <p className="mb-6 mt-1 text-sm text-fg-soft">
+                You'll be the organisation's Super Admin.
+              </p>
+              <form onSubmit={submitForm} className="grid gap-4">
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-fg-soft">Organisation name</label>
+                  <input className="input" type="text" placeholder="Acme Inc." value={orgName} onChange={(e) => setOrgName(e.target.value)} required maxLength={100} />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-fg-soft">Full name</label>
+                  <input className="input" type="text" placeholder="Jane Doe" value={name} onChange={(e) => setName(e.target.value)} required autoComplete="name" />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-fg-soft">Email</label>
+                  <input className="input" type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-fg-soft">Password</label>
+                  <input className="input" type="password" placeholder="Min. 8 characters" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+                </div>
+                <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
+                  {busy ? "Sending code…" : "Continue"}
+                </button>
+              </form>
+            </>
+          ) : (
+            <>
+              <h1 className="text-2xl font-bold tracking-tight text-fg">Check your email</h1>
+              <p className="mb-6 mt-1 text-sm text-fg-soft">{info}</p>
+              <form onSubmit={submitOtp} className="grid gap-4">
+                <input
+                  className="input text-center text-2xl tracking-[0.5em]"
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="000000"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  required
+                  autoFocus
+                />
+                <button
+                  type="submit"
+                  className="btn btn-primary btn-block"
+                  disabled={busy || code.length !== 6}
+                >
+                  {busy ? "Verifying…" : "Verify & create organisation"}
+                </button>
+              </form>
+              <p className="mt-4 text-center text-sm text-fg-soft">
+                Didn't get it?{" "}
+                <button className="link" onClick={resend}>Resend code</button>
+                {" · "}
+                <button className="link" onClick={() => { setStep("form"); setErr(null); }}>
+                  Edit details
+                </button>
+              </p>
+            </>
+          )}
 
-        {err && <p className="mt-3 text-sm text-danger">{err}</p>}
+          {err && <p className="mt-3 text-sm text-danger">{err}</p>}
+        </div>
 
-        <p className="mt-5 text-center text-sm text-fg-soft">
+        <p className="mt-6 text-center text-sm text-fg-soft">
           Already have an account?{" "}
-          <Link to="/login" className="link">
-            Sign in
-          </Link>
+          <Link to="/login" className="link">Sign in</Link>
         </p>
       </div>
     </div>

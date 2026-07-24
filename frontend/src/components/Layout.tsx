@@ -6,11 +6,14 @@ import { useOrg } from "../org";
 import { Avatar } from "./ui";
 import { Dropdown } from "./Dropdown";
 import { NotificationsBell } from "./NotificationsBell";
+import { AppShell } from "./layout";
+import { IconLogOut } from "./Icons";
 import type { ReactNode } from "react";
 
 export function Layout({ children }: { children: ReactNode }) {
   const { me, logout } = useAuth();
   const { orgs, activeOrg, activeOrgId, setActiveOrg } = useOrg();
+
   const navigate = useNavigate();
   const { pathname } = useLocation();
 
@@ -20,25 +23,30 @@ export function Layout({ children }: { children: ReactNode }) {
     enabled: !!activeOrgId,
   });
 
-  // Layout sits above <Routes>, so useParams() can't see :projectId — derive
-  // the active project from the path instead.
-  const currentProject = pathname.match(/\/projects\/([^/]+)/)?.[1] ?? "";
+  const currentProject =
+    pathname.match(/\/projects\/([^/]+)/)?.[1] ?? "";
 
   const admin = isAdminOrAboveIn(me, activeOrgId);
 
   return (
-    <div className="min-h-screen">
-      <header className="sticky top-0 z-10 border-b border-card-border bg-bg">
-        <div className="mx-auto flex max-w-6xl items-center gap-3 px-5 py-3">
-          <Link to="/" className="text-fg" style={{ fontWeight: 700, letterSpacing: "-0.02em" }}>
-            Tickets<span style={{ color: "var(--muted)" }}>.</span>
-          </Link>
+    <AppShell
+      admin={admin}
+      topbarLeft={
+        <div className="flex items-center gap-4">
 
-          {/* Organisation switcher */}
+          <div className="hidden xl:flex flex-col leading-tight">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted">
+              Workspace
+            </span>
+            <span className="text-sm font-semibold text-fg">
+              {activeOrg?.name || "Organisation"}
+            </span>
+          </div>
+
           <Dropdown
-            className="ml-2 w-44"
+            className="w-52"
             size="sm"
-            placeholder="Organisation…"
+            placeholder="Organisation"
             value={activeOrgId}
             onChange={(id) => {
               if (id === "__create__") {
@@ -49,62 +57,74 @@ export function Layout({ children }: { children: ReactNode }) {
               navigate("/");
             }}
             options={[
-              ...orgs.map((o) => ({ value: o.id, label: o.name })),
-              { value: "__create__", label: "+ New organisation" },
+              ...orgs.map((o) => ({
+                value: o.id,
+                label: o.name,
+              })),
+              {
+                value: "__create__",
+                label: "+ New organisation",
+              },
             ]}
           />
 
-          {/* Project switcher within the active org */}
           <Dropdown
-            className="w-48"
+            className="w-52"
             size="sm"
-            placeholder="Projects…"
+            placeholder="Project"
             value={currentProject}
             onChange={(id) => navigate(`/projects/${id}`)}
-            options={(projects ?? []).map((p) => ({ value: p.id, label: p.name }))}
+            options={(projects ?? []).map((p) => ({
+              value: p.id,
+              label: p.name,
+            }))}
           />
-
-          <div className="ml-auto flex items-center gap-3">
-            {admin && (
-              <Link to="/members" className="btn btn-secondary btn-sm">
-                Members
-              </Link>
-            )}
-            {admin && (
-              <Link to="/org-settings" className="btn btn-secondary btn-sm">
-                Settings
-              </Link>
-            )}
-            <NotificationsBell />
-            {me && (
-              <Link
-                to="/profile"
-                className="flex items-center gap-2 rounded-md px-1 py-0.5 hover:bg-card-border/40"
-                title="Profile & settings"
-              >
-                <Avatar name={me.name} url={me.avatarUrl} size={26} />
-                <span className="text-sm text-fg-soft">{me.name}</span>
-              </Link>
-            )}
-            <button
-              onClick={async () => {
-                await logout();
-                navigate("/login");
-              }}
-              className="btn btn-secondary btn-sm"
-            >
-              Logout
-            </button>
-          </div>
         </div>
-        {activeOrg && (
-          <div className="mx-auto max-w-6xl px-5 pb-2 text-xs text-fg-soft">
-            {activeOrg.name} · your role:{" "}
-            {activeOrg.role === "SUPER_ADMIN" ? "Super Admin" : activeOrg.role.toLowerCase()}
-          </div>
-        )}
-      </header>
-      <main className="mx-auto max-w-6xl px-5 py-7">{children}</main>
-    </div>
+      }
+      topbarRight={
+        <div className="flex items-center gap-3">
+
+          <NotificationsBell />
+
+          {me && (
+            <Link
+              to="/profile"
+              className="flex items-center gap-3 rounded-xl border border-card-border bg-white px-3 py-2 transition-all duration-200 hover:border-primary/30 hover:shadow-sm"
+            >
+              <Avatar
+                name={me.name}
+                url={me.avatarUrl}
+                size={32}
+              />
+
+              <div className="hidden lg:block leading-tight">
+                <div className="text-sm font-semibold text-fg">
+                  {me.name}
+                </div>
+                <div className="text-[11px] text-muted">
+                  {activeOrg?.role === "SUPER_ADMIN"
+                    ? "Super Admin"
+                    : activeOrg?.role}
+                </div>
+              </div>
+            </Link>
+          )}
+
+          <button
+            onClick={async () => {
+              await logout();
+              navigate("/login");
+            }}
+            className="btn btn-secondary btn-sm"
+            title="Log out"
+          >
+            <IconLogOut size={16} />
+            <span className="hidden sm:inline">Logout</span>
+          </button>
+        </div>
+      }
+    >
+      {children}
+    </AppShell>
   );
 }

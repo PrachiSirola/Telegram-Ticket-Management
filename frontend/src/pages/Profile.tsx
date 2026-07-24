@@ -56,32 +56,25 @@ export default function Profile() {
 
   return (
     <div className="mx-auto max-w-xl">
-      <div className="mb-6 flex items-center gap-3">
-        <Avatar name={me.name} url={me.avatarUrl} size={44} />
+      <div className="mb-6 flex items-center gap-4">
+        <Avatar name={me.name} url={me.avatarUrl} size={48} />
         <div>
-          <h1 className="text-xl font-bold tracking-tight">{me.name}</h1>
-          <p className="text-sm text-fg-soft">{me.email}</p>
+          <h1 className="text-xl font-bold tracking-tight text-fg">{me.name}</h1>
+          <p className="text-sm text-muted">{me.email}</p>
         </div>
       </div>
 
-      {/* Profile details */}
       <div className="card mb-5 p-6">
-        <div className="eyebrow mb-3">Profile</div>
-        <form onSubmit={saveName} className="grid gap-3">
-          <label className="grid gap-1 text-sm">
-            <span className="text-fg-soft">Display name</span>
-            <input
-              className="input"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-              maxLength={100}
-            />
-          </label>
-          <label className="grid gap-1 text-sm">
-            <span className="text-fg-soft">Email</span>
+        <div className="eyebrow mb-4">Profile</div>
+        <form onSubmit={saveName} className="grid gap-4">
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-fg-soft">Display name</label>
+            <input className="input" value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-fg-soft">Email</label>
             <input className="input" value={me.email} disabled />
-          </label>
+          </div>
           <div className="flex items-center gap-3">
             <button type="submit" className="btn btn-primary" disabled={savingName}>
               {savingName ? "Saving…" : "Save changes"}
@@ -95,44 +88,21 @@ export default function Profile() {
         </form>
       </div>
 
-      {/* Change password */}
       <div className="card p-6">
-        <div className="eyebrow mb-3">Change password</div>
-        <form onSubmit={savePassword} className="grid gap-3">
-          <label className="grid gap-1 text-sm">
-            <span className="text-fg-soft">Current password</span>
-            <input
-              className="input"
-              type="password"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              autoComplete="current-password"
-              required
-            />
-          </label>
-          <label className="grid gap-1 text-sm">
-            <span className="text-fg-soft">New password</span>
-            <input
-              className="input"
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              required
-              minLength={8}
-              autoComplete="new-password"
-            />
-          </label>
-          <label className="grid gap-1 text-sm">
-            <span className="text-fg-soft">Confirm new password</span>
-            <input
-              className="input"
-              type="password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              required
-              autoComplete="new-password"
-            />
-          </label>
+        <div className="eyebrow mb-4">Change password</div>
+        <form onSubmit={savePassword} className="grid gap-4">
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-fg-soft">Current password</label>
+            <input className="input" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoComplete="current-password" required />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-fg-soft">New password</label>
+            <input className="input" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-fg-soft">Confirm new password</label>
+            <input className="input" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" />
+          </div>
           <div className="flex items-center gap-3">
             <button type="submit" className="btn btn-primary" disabled={savingPw}>
               {savingPw ? "Saving…" : "Update password"}
