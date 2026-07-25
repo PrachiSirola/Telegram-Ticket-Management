@@ -7,7 +7,7 @@ function required(name: string, fallback?: string): string {
 }
 
 export const env = {
-  port: Number(process.env.PORT ?? 4000),
+  port: Number(process.env.PORT ?? 1019),
   nodeEnv: process.env.NODE_ENV ?? "development",
   isProd: (process.env.NODE_ENV ?? "development") === "production",
 
@@ -16,7 +16,7 @@ export const env = {
   jwtSecret: required("JWT_SECRET", "dev-secret-change-me"),
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? "tm_session",
 
-  frontendUrl: process.env.FRONTEND_URL ?? "http://localhost:5173",
+  frontendUrl: process.env.FRONTEND_URL ?? "http://localhost:1020",
 
   // Transactional email (signup OTPs, password-reset links).
   // Driver precedence: SMTP_URL (local Mailpit) → RESEND_API_KEY → console log.

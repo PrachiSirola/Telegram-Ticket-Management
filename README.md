@@ -21,15 +21,15 @@ cp .env.example .env          # already has working dev defaults
 npm install
 npx prisma migrate dev        # create schema
 npm run db:seed               # seed CEO, devs, two client workspaces, sample tickets
-npm run dev                   # http://localhost:4000
+npm run dev                   # http://localhost:1019
 
 # 3. Frontend (new terminal)
 cd frontend
 npm install
-npm run dev                   # http://localhost:5173
+npm run dev                   # http://localhost:1020
 ```
 
-Open http://localhost:5173. Google OAuth is disabled until you add credentials, so use
+Open http://localhost:1020. Google OAuth is disabled until you add credentials, so use
 **Dev login** to sign in as any seeded account:
 
 | Account | Role |
@@ -44,7 +44,7 @@ Open http://localhost:5173. Google OAuth is disabled until you add credentials, 
 
 1. Create OAuth credentials at https://console.cloud.google.com/apis/credentials
 2. Set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `backend/.env`
-3. Add `http://localhost:4000/auth/google/callback` as an authorized redirect URI
+3. Add `http://localhost:1019/auth/google/callback` as an authorized redirect URI
 4. Set `DEV_LOGIN_ENABLED="false"` for production
 
 Login is **invite-only**: a user can only sign in if they already exist or have a pending
