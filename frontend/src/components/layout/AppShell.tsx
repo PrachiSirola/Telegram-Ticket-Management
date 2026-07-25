@@ -9,12 +9,12 @@ import { Topbar } from "./Topbar";
   and update the `image` path here.
 */
 const PAGE_BG: Record<string, { image: string; opacity: number; blur: number }> = {
-  "/":            { image: "/backgroundimage8.jpeg",  opacity: 0.15, blur: 0  },
-  "/projects":    { image: "/backgroundimage7.jpeg",  opacity: 0.15,  blur: 0 },
-  "/profile":     { image: "/backgroundimage4.jpeg",  opacity: 0.15,  blur: 0 },
-  "/members":     { image: "/backgroundimage1.jpeg",  opacity: 0.15,  blur: 0 },
-  "/org-settings":{ image: "/backgroundimage6.jpeg",  opacity: 0.15,  blur: 0 },
-  "/tickets":     { image: "/backgroundimage1.jpeg",  opacity: 0.15, blur: 0 },
+  "/":            { image: "/backgroundimage8.jpeg",  opacity: 0.15, blur: 15 },
+  "/projects":    { image: "/backgroundimage7.jpeg",  opacity: 0.15,  blur: 15 },
+  "/profile":     { image: "/backgroundimage4.jpeg",  opacity: 0.15,  blur: 10},
+  "/members":     { image: "/backgroundimage1.jpeg",  opacity: 0.15,  blur: 10 },
+  "/org-settings":{ image: "/backgroundimage6.jpeg",  opacity: 0.15,  blur: 10 },
+  "/tickets":     { image: "/backgroundimage1.jpeg",  opacity: 0.15, blur: 10 },
 };
 
 const DEFAULT_BG = { image: "/backgroundimage.jpeg", opacity: 0.04, blur: 1.5 };
