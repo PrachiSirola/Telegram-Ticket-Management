@@ -7,31 +7,31 @@ import { env } from "../env.js";
   History, for the next person who touches this file: earlier versions
   tried increasingly elaborate workarounds here — a hardcoded IP, then a
   `family: 4` option, then a hand-rolled DNS-resolution-and-pin-the-IP
-  scheme — chasing an intermittent/then-consistent ETIMEDOUT talking to
-  Gmail from Render.
+  scheme, then manually specifying host/port — chasing an intermittent/
+  then-consistent ETIMEDOUT talking to Gmail from Render.
 
-  The actual fix was much simpler: this project had nodemailer@9.x
-  installed, which ships its own custom hostname resolver that queries
-  both the A and AAAA records for the host and picks a RANDOM one —
-  ignoring any `family` option entirely. That's what caused the
-  intermittent IPv6 attempts (Render's containers can't route outbound
-  IPv6) and, once "fixed" by hand-pinning a single resolved IP, a
-  *consistent* timeout instead (Gmail's frontends don't reliably accept
-  direct-to-IP connections the way they accept normal hostname-resolved
-  ones).
+  Two things actually mattered:
 
-  nodemailer is now pinned to the 6.x line (see package.json), which
-  predates that custom resolver and just connects to the hostname
-  directly, the standard way — the same setup already proven to work
-  reliably against Gmail from Render elsewhere. No DNS tricks needed.
+  1. This project had nodemailer@9.x installed, which ships its own
+     custom hostname resolver that queries both the A and AAAA records
+     and picks a RANDOM one — ignoring any `family` option entirely.
+     That caused the intermittent IPv6 attempts (Render's containers
+     can't route outbound IPv6). Fixed by pinning nodemailer to the 6.x
+     line (see package.json), which predates that resolver.
+
+  2. Rather than guess host/port ourselves, use Nodemailer's built-in
+     `service: "gmail"` shorthand — the exact same shape already proven
+     to work reliably against Gmail from Render elsewhere. It resolves
+     internally to host: smtp.gmail.com, port: 465, secure: true (see
+     nodemailer/lib/well-known/services.json) — notably port 465
+     (implicit TLS), not 587 (STARTTLS). Manually specifying 587 was
+     itself part of what didn't match the known-working setup.
 */
 
 const smtp: Transporter | null =
   env.email.user && env.email.pass
     ? nodemailer.createTransport({
-        host: env.email.host,           // smtp.gmail.com
-        port: env.email.port,           // 587 (STARTTLS)
-        secure: env.email.port === 465, // true only for the legacy implicit-TLS port
+        service: "gmail", // resolves to host/port/secure internally — no need to specify SMTP_HOST/SMTP_PORT
         auth: {
           user: env.email.user,
           pass: env.email.pass,

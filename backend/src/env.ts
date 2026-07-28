@@ -24,7 +24,10 @@ export const env = {
     port: Number(process.env.SMTP_PORT ?? 587),
     user: process.env.SMTP_USER ?? "",
     pass: process.env.SMTP_PASS ?? "",
-    from: process.env.SMTP_FROM ?? "Tickets <noreply@example.com>",
+    from: process.env.SMTP_FROM ?? "Ticketmanagement <noreply@example.com>",
+    get enabled() {
+      return Boolean(this.user && this.pass);
+    },
   },
 
   // Attachments (local disk for now; swap to S3/R2 for production PaaS).
