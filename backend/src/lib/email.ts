@@ -14,6 +14,12 @@ const smtp =
         host: "192.178.211.109",
         port: 587,
         secure: false,
+        pool: true,
+        maxConnections: 2,
+        maxMessages: 100,
+        connectionTimeout: 30000,
+        greetingTimeout: 30000,
+        socketTimeout: 60000,
         auth: {
           user: env.email.user,
           pass: env.email.pass,
