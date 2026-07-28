@@ -1,23 +1,81 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { env } from "../env.js";
 
+/*
+  Gmail SMTP transport.
+
+  Root causes of the intermittent Render ETIMEDOUT you were seeing:
+
+  1. The previous version hardcoded a literal IP address
+     ("192.178.211.109") as `host`, with `tls.servername` forced to
+     "smtp.gmail.com" to make the cert still validate. `smtp.gmail.com`
+     is a load-balanced hostname — Google rotates the IPs behind it
+     constantly and serves different addresses to different regions/
+     networks. Pinning one specific IP means the connection only works
+     for as long as that address happens to still be valid and
+     reachable from Render's egress network. The moment Google rotates
+     it, or Render's IP falls outside whatever route that address was
+     reachable from, every future connection to that literal IP times
+     out — which matches "worked once, then ETIMEDOUT" exactly. Fix:
+     connect to the hostname (`smtp.gmail.com`) and let DNS resolve it
+     fresh on every connection, the way it's supposed to work.
+
+  2. `if (smtp) { ...; return; }` in the old sendMail path was
+     inverted — it bailed out whenever the transporter *did* exist,
+     so `smtp.sendMail` was never actually reached in production.
+
+  3. `smtp.verify()` was being called before every single send. That's
+     a second full TCP+TLS handshake per email in addition to the one
+     `sendMail` itself performs — doubling the surface area for a
+     flaky/slow network hop (like Render's shared free-tier egress) to
+     time out. Verify once at startup for a health check/log line, not
+     per-request.
+
+  4. No explicit timeouts or connection pooling were set, so a stalled
+     handshake just hangs until Node's default OS-level TCP timeout
+     (which can be much longer than Render's own request budget),
+     instead of failing fast and letting your app decide what to do
+     (e.g. skip email rather than hang the whole request).
+*/
+
+// `family` isn't declared anywhere in @types/nodemailer's option types (for
+// any of its transport variants), even though Nodemailer itself passes it
+// straight through to Node's net/tls connect() at runtime. Importing the
+// internal SMTPPool type to add it back in via intersection turned out to
+// be fragile — its exact module path/layout can differ across installed
+// @types/nodemailer versions and package managers. Instead, build the
+// config as a plain object and cast only at the createTransport call
+// site below: that keeps every other option (host, port, auth, pool,
+// timeouts) fully type-checked, and only opts out of checking for this
+// one library-typing gap — reliably, regardless of environment.
+const smtpOptions = {
+  pool: true,
+  host: env.email.host,       // smtp.gmail.com — resolved fresh each time, never a pinned IP
+  port: env.email.port,       // 587 (STARTTLS)
+  secure: env.email.port === 465, // true only for the legacy implicit-TLS port
+  family: 4,                  // force IPv4 — Render's egress doesn't support IPv6
+  auth: {
+    user: env.email.user,
+    pass: env.email.pass,
+  },
+  // Reuse one authenticated connection instead of opening a fresh
+  // TCP+TLS handshake for every email — fewer handshakes means
+  // fewer chances for a single flaky connection attempt to hit
+  // Render's network and time out.
+  maxConnections: 1,
+  maxMessages: 50,
+  // Fail fast instead of hanging on a stalled handshake. Render's
+  // free-tier egress can be slow to establish a new connection;
+  // these bound how long we wait before giving up and retrying
+  // on the *next* send, rather than blocking indefinitely.
+  connectionTimeout: 10_000, // time to establish the TCP connection
+  greetingTimeout: 10_000,   // time to receive the SMTP greeting after connecting
+  socketTimeout: 20_000,     // time allowed for the whole exchange once connected
+};
+
 const smtp: Transporter | null =
   env.email.user && env.email.pass
-    ? nodemailer.createTransport({
-        host: env.email.host,       // smtp.gmail.com — resolved fresh each time, never a pinned IP
-        port: env.email.port,       // 587 (STARTTLS)
-        secure: env.email.port === 465, // true only for the legacy implicit-TLS port
-        auth: {
-          user: env.email.user,
-          pass: env.email.pass,
-        },
-        pool: true,
-        maxConnections: 1,
-        maxMessages: 50,
-        connectionTimeout: 10_000, // time to establish the TCP connection
-        greetingTimeout: 10_000,   // time to receive the SMTP greeting after connecting
-        socketTimeout: 20_000,     // time allowed for the whole exchange once connected
-      })
+    ? nodemailer.createTransport(smtpOptions as Parameters<typeof nodemailer.createTransport>[0])
     : null;
 
 // One-time startup check (not per-send) — logs whether Gmail auth/network
