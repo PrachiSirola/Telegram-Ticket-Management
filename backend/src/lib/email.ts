@@ -1,61 +1,38 @@
-import nodemailer, { type Transporter } from "nodemailer";
 import { env } from "../env.js";
 
 /*
-  Gmail SMTP transport.
+  Email delivery via Brevo's HTTP API.
 
-  History, for the next person who touches this file: earlier versions
-  tried increasingly elaborate workarounds here — a hardcoded IP, then a
-  `family: 4` option, then a hand-rolled DNS-resolution-and-pin-the-IP
-  scheme, then manually specifying host/port — chasing an intermittent/
-  then-consistent ETIMEDOUT talking to Gmail from Render.
+  History, for the next person who touches this file: every previous
+  version of this file used Nodemailer over raw SMTP (ports 465/587)
+  to Gmail. That worked perfectly from a local machine but reliably
+  timed out (`ETIMEDOUT`, `command: 'CONN'`) when running on Render —
+  even after ruling out every configuration issue along the way (wrong
+  IP family, wrong Nodemailer version, wrong port). The conclusion,
+  confirmed by the local/Render split (identical code, identical
+  credentials, only the network differs): Render blocks outbound SMTP
+  ports from its containers. This is a known restriction on several
+  free-tier PaaS platforms, to stop their shared IP ranges from being
+  used to relay spam — no amount of client-side configuration can get
+  a raw SMTP connection through it.
 
-  Two things actually mattered:
+  The fix is to stop using SMTP entirely. Brevo's API sends email over
+  a normal HTTPS POST request (port 443) — indistinguishable from any
+  other outbound API call your app already makes, so it isn't affected
+  by SMTP-specific port blocking. Free tier: 300 emails/day, and unlike
+  Resend's default sender, Brevo's single-sender verification lets you
+  verify one email address you already own (e.g. your Gmail) by
+  clicking a confirmation link — no domain or DNS records required —
+  and then send to any recipient, not just yourself.
 
-  1. This project had nodemailer@9.x installed, which ships its own
-     custom hostname resolver that queries both the A and AAAA records
-     and picks a RANDOM one — ignoring any `family` option entirely.
-     That caused the intermittent IPv6 attempts (Render's containers
-     can't route outbound IPv6). Fixed by pinning nodemailer to the 6.x
-     line (see package.json), which predates that resolver.
-
-  2. Rather than guess host/port ourselves, use Nodemailer's built-in
-     `service: "gmail"` shorthand — the exact same shape already proven
-     to work reliably against Gmail from Render elsewhere. It resolves
-     internally to host: smtp.gmail.com, port: 465, secure: true (see
-     nodemailer/lib/well-known/services.json) — notably port 465
-     (implicit TLS), not 587 (STARTTLS). Manually specifying 587 was
-     itself part of what didn't match the known-working setup.
+  Setup (one-time, in the Brevo dashboard):
+    1. Sign up at brevo.com (free).
+    2. Settings → Senders, Domains & Dedicated IPs → add your email as
+       a sender → click the verification link Brevo emails you.
+    3. Settings → SMTP & API → API Keys → generate a new key.
+    4. Set on Render: BREVO_API_KEY=<that key>, and make sure
+       SMTP_FROM matches the exact address you verified as a sender.
 */
-
-const smtp: Transporter | null =
-  env.email.user && env.email.pass
-    ? nodemailer.createTransport({
-        service: "gmail", // resolves to host/port/secure internally — no need to specify SMTP_HOST/SMTP_PORT
-        auth: {
-          user: env.email.user,
-          pass: env.email.pass,
-        },
-        // Reuse one authenticated connection instead of opening a fresh
-        // TCP+TLS handshake for every email.
-        pool: true,
-        maxConnections: 1,
-        maxMessages: 50,
-        // Fail fast instead of hanging on a stalled handshake.
-        connectionTimeout: 10_000, // time to establish the TCP connection
-        greetingTimeout: 10_000,   // time to receive the SMTP greeting after connecting
-        socketTimeout: 20_000,     // time allowed for the whole exchange once connected
-      })
-    : null;
-
-// One-time startup check (not per-send) — logs whether Gmail auth/network
-// is reachable at boot, without adding a second handshake to every email.
-if (smtp) {
-  smtp.verify((err) => {
-    if (err) console.error("[email] SMTP verify failed at startup:", err);
-    else console.log("[email] SMTP verified — ready to send.");
-  });
-}
 
 interface SendEmailOpts {
   to: string;
@@ -64,33 +41,56 @@ interface SendEmailOpts {
   text: string;
 }
 
+/** Parses "Name <email@example.com>" or a bare "email@example.com" into
+ *  Brevo's { name, email } sender shape. */
+function parseSender(from: string): { name?: string; email: string } {
+  const match = from.match(/^(.*)<(.+)>$/);
+  if (match) {
+    return { name: match[1].trim().replace(/^"|"$/g, ""), email: match[2].trim() };
+  }
+  return { email: from.trim() };
+}
+
 /**
- * Send a transactional email via Gmail SMTP. Falls back to logging to the
- * console if SMTP_USER/SMTP_PASS aren't set (e.g. local dev without
- * credentials configured). Never throws — a failed email should never
- * break the request that triggered it (signup, invite, password reset).
+ * Send a transactional email via Brevo's HTTP API. Falls back to logging to
+ * the console if BREVO_API_KEY isn't set (e.g. local dev without email
+ * configured). Never throws — a failed email should never break the
+ * request that triggered it (signup, invite, password reset).
  */
 export async function sendEmail(opts: SendEmailOpts) {
-  if (!smtp) {
+  if (!env.email.enabled) {
     console.log(
       `\n[email:console] to=${opts.to} subject="${opts.subject}"\n${opts.text}\n`,
     );
     return;
   }
   try {
-    const info = await smtp.sendMail({
-      from: env.email.from,
-      to: opts.to,
-      subject: opts.subject,
-      html: opts.html,
-      text: opts.text,
+    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "api-key": env.email.brevoApiKey,
+      },
+      body: JSON.stringify({
+        sender: parseSender(env.email.from),
+        to: [{ email: opts.to }],
+        subject: opts.subject,
+        htmlContent: opts.html,
+        textContent: opts.text,
+      }),
     });
-    console.log("[email] sent:", info.messageId, "to", opts.to);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`[email] send failed: ${res.status} ${res.statusText} — ${body}`);
+      return;
+    }
+
+    const data = (await res.json()) as { messageId?: string };
+    console.log("[email] sent:", data.messageId, "to", opts.to);
   } catch (err) {
-    // A single failed send (e.g. one ETIMEDOUT connection attempt) no
-    // longer takes the whole transporter down — pool:true keeps the
-    // connection slot available for the next attempt.
-    console.error("[email] send failed:", err);
+    console.error("[email] send error:", err);
   }
 }
 

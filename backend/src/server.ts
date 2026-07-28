@@ -4,8 +4,6 @@ import { env } from "./env.js";
 const app = createApp();
 app.listen(env.port, () => {
   console.log(`API listening on http://localhost:${env.port}`);
-  const emailMode = env.email.enabled
-    ? `Gmail SMTP (as ${env.email.user})`
-    : "console fallback";
+  const emailMode = env.email.enabled ? "Brevo API" : "console fallback";
   console.log(`  Email: ${emailMode}`);
 });
