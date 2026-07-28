@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useAuth } from "../auth";
-//import { PasswordInput } from "../components/PasswordInput";
+import { PasswordInput } from "../components/PasswordInput";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -38,7 +38,7 @@ export default function Login() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 overflow-hidden">
-        <div className="pointer-events-none absolute inset-0" style={{ backgroundImage: "url(/backgroundimage2.jpeg)", backgroundSize: "cover", backgroundPosition: "center", opacity: 0.05, filter: "blur(2px) saturate(0.5)" }} />
+        <div className="pointer-events-none absolute inset-0" style={{ backgroundImage: "url(/backgroundimage.jpeg)", backgroundSize: "cover", backgroundPosition: "center", opacity: 0.05, filter: "blur(2px) saturate(0.5)" }} />
       <div className="relative z-10 w-full max-w-sm">
         {/* Brand mark */}
         <div className="mb-8 text-center">
@@ -72,7 +72,7 @@ export default function Login() {
             </div>
             <div>
               <label className="mb-1.5 block text-sm font-medium text-fg-soft">Password</label>
-              <input
+              <PasswordInput
                 className="input"
                 placeholder="••••••••"
                 value={password}

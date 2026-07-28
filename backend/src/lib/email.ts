@@ -1,35 +1,34 @@
-import nodemailer from "nodemailer";
+import nodemailer, { type Transporter } from "nodemailer";
 import { env } from "../env.js";
 
-console.log({
-  host: env.email.host,
-  port: env.email.port,
-  user: env.email.user,
-  from: env.email.from,
-  passLength: env.email.pass.length,
-});
-const smtp = 
+const smtp: Transporter | null =
   env.email.user && env.email.pass
     ? nodemailer.createTransport({
-        host: "192.178.211.109",
-        port: 587,
-        secure: false,
+        host: env.email.host,       // smtp.gmail.com — resolved fresh each time, never a pinned IP
+        port: env.email.port,       // 587 (STARTTLS)
+        secure: env.email.port === 465, // true only for the legacy implicit-TLS port
         auth: {
           user: env.email.user,
           pass: env.email.pass,
         },
-        tls: {
-          servername: "smtp.gmail.com",
-        },
+        pool: true,
+        maxConnections: 1,
+        maxMessages: 50,
+        connectionTimeout: 10_000, // time to establish the TCP connection
+        greetingTimeout: 10_000,   // time to receive the SMTP greeting after connecting
+        socketTimeout: 20_000,     // time allowed for the whole exchange once connected
       })
     : null;
-smtp?.verify((err: Error | null, success: boolean) => {
-  if (err) {
-    console.error("SMTP VERIFY ERROR:", err);
-  } else {
-    console.log("SMTP VERIFIED");
-  }
-});
+
+// One-time startup check (not per-send) — logs whether Gmail auth/network
+// is reachable at boot, without adding a second handshake to every email.
+if (smtp) {
+  smtp.verify((err) => {
+    if (err) console.error("[email] SMTP verify failed at startup:", err);
+    else console.log("[email] SMTP verified — ready to send.");
+  });
+}
+
 interface SendEmailOpts {
   to: string;
   subject: string;
@@ -37,18 +36,20 @@ interface SendEmailOpts {
   text: string;
 }
 
+/**
+ * Send a transactional email via Gmail SMTP. Falls back to logging to the
+ * console if SMTP_USER/SMTP_PASS aren't set (e.g. local dev without
+ * credentials configured). Never throws — a failed email should never
+ * break the request that triggered it (signup, invite, password reset).
+ */
 export async function sendEmail(opts: SendEmailOpts) {
+  if (!smtp) {
+    console.log(
+      `\n[email:console] to=${opts.to} subject="${opts.subject}"\n${opts.text}\n`,
+    );
+    return;
+  }
   try {
-    if (smtp) {
-      console.log("SMTP transporter not available");
-      return;
-    }
-    console.log("Verifying SMTP...");
-    await smtp.verify();
-    console.log("SMTP verified successfully.");
-
-    console.log("Sending email to:", opts.to);
-
     const info = await smtp.sendMail({
       from: env.email.from,
       to: opts.to,
@@ -56,17 +57,14 @@ export async function sendEmail(opts: SendEmailOpts) {
       html: opts.html,
       text: opts.text,
     });
-    console.log("Email sent successfully:", info.messageId);
-    return;
-  }catch (err) {
-    console.error("[email] send error:", err);
+    console.log("[email] sent:", info.messageId, "to", opts.to);
+  } catch (err) {
+    // A single failed send (e.g. one ETIMEDOUT connection attempt) no
+    // longer takes the whole transporter down — pool:true keeps the
+    // connection slot available for the next attempt.
+    console.error("[email] send failed:", err);
   }
 }
-
-/* ─────────────────────────────────────────────────────────
-   Shared layout helpers — dark brown header, warm card,
-   professional footer. All inline CSS for email clients.
-   ───────────────────────────────────────────────────────── */
 
 const BRAND_BG = "#2c1810";
 const BRAND_TEXT = "#ffffff";
