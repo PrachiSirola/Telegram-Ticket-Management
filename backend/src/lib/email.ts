@@ -1,91 +1,129 @@
 import nodemailer, { type Transporter } from "nodemailer";
+import dns from "node:dns/promises";
 import { env } from "../env.js";
 
 /*
   Gmail SMTP transport.
 
-  Root causes of the intermittent Render ETIMEDOUT you were seeing:
+  Root causes chased down across the last few rounds of debugging:
 
-  1. The previous version hardcoded a literal IP address
-     ("192.178.211.109") as `host`, with `tls.servername` forced to
-     "smtp.gmail.com" to make the cert still validate. `smtp.gmail.com`
-     is a load-balanced hostname — Google rotates the IPs behind it
-     constantly and serves different addresses to different regions/
-     networks. Pinning one specific IP means the connection only works
-     for as long as that address happens to still be valid and
-     reachable from Render's egress network. The moment Google rotates
-     it, or Render's IP falls outside whatever route that address was
-     reachable from, every future connection to that literal IP times
-     out — which matches "worked once, then ETIMEDOUT" exactly. Fix:
-     connect to the hostname (`smtp.gmail.com`) and let DNS resolve it
-     fresh on every connection, the way it's supposed to work.
+  1. The original version hardcoded a literal IP address as `host`.
+     `smtp.gmail.com` is load-balanced across many rotating IPs — pinning
+     one meant the connection only worked until Google rotated it or
+     Render's route to it changed. Fixed by resolving fresh (see below)
+     instead of ever hardcoding one.
 
-  2. `if (smtp) { ...; return; }` in the old sendMail path was
-     inverted — it bailed out whenever the transporter *did* exist,
-     so `smtp.sendMail` was never actually reached in production.
+  2. `if (smtp) { ...; return; }` in the old sendMail path was inverted —
+     it bailed out whenever the transporter *did* exist, so `sendMail`
+     was never actually reached in production.
 
-  3. `smtp.verify()` was being called before every single send. That's
-     a second full TCP+TLS handshake per email in addition to the one
-     `sendMail` itself performs — doubling the surface area for a
-     flaky/slow network hop (like Render's shared free-tier egress) to
-     time out. Verify once at startup for a health check/log line, not
-     per-request.
+  3. `smtp.verify()` was being called before every single send, doubling
+     the number of handshakes per email. Now verified once at startup
+     only, as a health-check log line.
 
-  4. No explicit timeouts or connection pooling were set, so a stalled
-     handshake just hangs until Node's default OS-level TCP timeout
-     (which can be much longer than Render's own request budget),
-     instead of failing fast and letting your app decide what to do
-     (e.g. skip email rather than hang the whole request).
+  4. No explicit timeouts/pooling were set, so a stalled handshake just
+     hung until Node's default OS-level TCP timeout. Now bounded and
+     pooled (see smtpOptions below).
+
+  5. Passing `family: 4` to Nodemailer does NOT do what it looks like it
+     should. Nodemailer's own hostname resolver (lib/shared/index.js,
+     `resolveHostname`/`resolve`) queries BOTH the A (IPv4) and AAAA
+     (IPv6) records for the host, concatenates them, and then picks a
+     RANDOM address from that combined list — it never reads `family`
+     to filter which record types it queries or which address it picks.
+     That's why Render kept intermittently getting an IPv6 address
+     (`ENETUNREACH`) even with `family: 4` set: roughly half the time,
+     Nodemailer's own coin flip landed on the AAAA result, and Render's
+     containers can't route outbound IPv6 at all.
+
+     Fix: don't let Nodemailer resolve the hostname itself. Resolve the
+     A (IPv4-only) record ourselves via Node's `dns.resolve4()` — which
+     genuinely does filter by family — and hand Nodemailer the resulting
+     IP literal as `host`. When `host` is already a literal IP, Nodemailer
+     short-circuits its own resolver entirely (see the `net.isIP(options.host)`
+     check in `resolveHostname`), so its buggy random dual-stack pick never
+     runs. `servername` is set explicitly to the real hostname so the TLS
+     certificate still validates correctly against `smtp.gmail.com` rather
+     than the bare IP.
+
+     To avoid recreating the original "pinned IP goes stale" bug, the
+     resolved address is re-resolved on a timer (every 10 minutes) and the
+     transporter is recreated with the fresh address — so a Google-side
+     IP rotation heals itself automatically instead of requiring a redeploy.
 */
 
-// `family` isn't declared anywhere in @types/nodemailer's option types (for
-// any of its transport variants), even though Nodemailer itself passes it
-// straight through to Node's net/tls connect() at runtime. Importing the
-// internal SMTPPool type to add it back in via intersection turned out to
-// be fragile — its exact module path/layout can differ across installed
-// @types/nodemailer versions and package managers. Instead, build the
-// config as a plain object and cast only at the createTransport call
-// site below: that keeps every other option (host, port, auth, pool,
-// timeouts) fully type-checked, and only opts out of checking for this
-// one library-typing gap — reliably, regardless of environment.
-const smtpOptions = {
-  pool: true,
-  host: env.email.host,       // smtp.gmail.com — resolved fresh each time, never a pinned IP
-  port: env.email.port,       // 587 (STARTTLS)
-  secure: env.email.port === 465, // true only for the legacy implicit-TLS port
-  family: 4,                  // force IPv4 — Render's egress doesn't support IPv6
-  auth: {
-    user: env.email.user,
-    pass: env.email.pass,
-  },
-  // Reuse one authenticated connection instead of opening a fresh
-  // TCP+TLS handshake for every email — fewer handshakes means
-  // fewer chances for a single flaky connection attempt to hit
-  // Render's network and time out.
-  maxConnections: 1,
-  maxMessages: 50,
-  // Fail fast instead of hanging on a stalled handshake. Render's
-  // free-tier egress can be slow to establish a new connection;
-  // these bound how long we wait before giving up and retrying
-  // on the *next* send, rather than blocking indefinitely.
-  connectionTimeout: 10_000, // time to establish the TCP connection
-  greetingTimeout: 10_000,   // time to receive the SMTP greeting after connecting
-  socketTimeout: 20_000,     // time allowed for the whole exchange once connected
-};
+interface SmtpConfig {
+  pool: true;
+  host: string;
+  port: number;
+  secure: boolean;
+  servername: string;
+  auth: { user: string; pass: string };
+  maxConnections: number;
+  maxMessages: number;
+  connectionTimeout: number;
+  greetingTimeout: number;
+  socketTimeout: number;
+}
 
-const smtp: Transporter | null =
-  env.email.user && env.email.pass
-    ? nodemailer.createTransport(smtpOptions as Parameters<typeof nodemailer.createTransport>[0])
-    : null;
+function buildSmtpOptions(resolvedHost: string): SmtpConfig {
+  return {
+    pool: true,
+    host: resolvedHost,             // a literal IPv4 address — never a hostname Nodemailer would re-resolve itself
+    port: env.email.port,           // 587 (STARTTLS)
+    secure: env.email.port === 465, // true only for the legacy implicit-TLS port
+    servername: env.email.host,     // keeps TLS cert validation matching the real hostname, not the IP
+    auth: {
+      user: env.email.user,
+      pass: env.email.pass,
+    },
+    // Reuse one authenticated connection instead of opening a fresh
+    // TCP+TLS handshake for every email — fewer handshakes means fewer
+    // chances for a single flaky connection attempt to hit Render's
+    // network and time out.
+    maxConnections: 1,
+    maxMessages: 50,
+    // Fail fast instead of hanging on a stalled handshake.
+    connectionTimeout: 10_000, // time to establish the TCP connection
+    greetingTimeout: 10_000,   // time to receive the SMTP greeting after connecting
+    socketTimeout: 20_000,     // time allowed for the whole exchange once connected
+  };
+}
 
-// One-time startup check (not per-send) — logs whether Gmail auth/network
-// is reachable at boot, without adding a second handshake to every email.
-if (smtp) {
+/** Resolve the IPv4 (A record) address for env.email.host. Falls back to the
+ *  hostname itself if DNS lookup fails, so email still has a chance to send
+ *  (via Nodemailer's own resolver) rather than hard-failing outright. */
+async function resolveIPv4(host: string): Promise<string> {
+  try {
+    const addresses = await dns.resolve4(host);
+    if (addresses.length > 0) {
+      return addresses[Math.floor(Math.random() * addresses.length)];
+    }
+  } catch (err) {
+    console.error(`[email] IPv4 resolution for ${host} failed, falling back to hostname:`, err);
+  }
+  return host;
+}
+
+let smtp: Transporter | null = null;
+
+async function rebuildTransport() {
+  if (!env.email.user || !env.email.pass) return;
+  const resolvedHost = await resolveIPv4(env.email.host);
+  const options = buildSmtpOptions(resolvedHost);
+  smtp?.close();
+  smtp = nodemailer.createTransport(options as Parameters<typeof nodemailer.createTransport>[0]);
   smtp.verify((err) => {
-    if (err) console.error("[email] SMTP verify failed at startup:", err);
-    else console.log("[email] SMTP verified — ready to send.");
+    if (err) console.error("[email] SMTP verify failed:", err);
+    else console.log(`[email] SMTP verified — sending via ${resolvedHost} (${env.email.host}).`);
   });
 }
+
+// Build the transport at startup (top-level await — this project runs as
+// an ES module, so this is valid), then refresh it periodically in case
+// Google rotates the IP behind smtp.gmail.com.
+await rebuildTransport();
+setInterval(rebuildTransport, 10 * 60 * 1000).unref();
 
 interface SendEmailOpts {
   to: string;
