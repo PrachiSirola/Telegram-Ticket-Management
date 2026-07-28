@@ -2,6 +2,8 @@ import { useState } from "react";
 import { api } from "../lib/api";
 import { useAuth } from "../auth";
 import { Avatar } from "../components/ui";
+import { PasswordInput } from "../components/PasswordInput";
+import { IconLock } from "../components/Icons";
 
 export default function Profile() {
   const { me, refresh } = useAuth();
@@ -73,7 +75,11 @@ export default function Profile() {
           </div>
           <div>
             <label className="mb-1.5 block text-sm font-medium text-fg-soft">Email</label>
-            <input className="input" value={me.email} disabled />
+            <div className="relative">
+              <input className="input pr-10 bg-accent/50 text-muted cursor-not-allowed" value={me.email} disabled />
+              <IconLock size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted" />
+            </div>
+            <p className="mt-1 text-xs text-muted">Email cannot be changed</p>
           </div>
           <div className="flex items-center gap-3">
             <button type="submit" className="btn btn-primary" disabled={savingName}>
@@ -93,15 +99,15 @@ export default function Profile() {
         <form onSubmit={savePassword} className="grid gap-4">
           <div>
             <label className="mb-1.5 block text-sm font-medium text-fg-soft">Current password</label>
-            <input className="input" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoComplete="current-password" required />
+            <PasswordInput className="input" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoComplete="current-password" required />
           </div>
           <div>
             <label className="mb-1.5 block text-sm font-medium text-fg-soft">New password</label>
-            <input className="input" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+            <PasswordInput className="input" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
           </div>
           <div>
             <label className="mb-1.5 block text-sm font-medium text-fg-soft">Confirm new password</label>
-            <input className="input" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" />
+            <PasswordInput className="input" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" />
           </div>
           <div className="flex items-center gap-3">
             <button type="submit" className="btn btn-primary" disabled={savingPw}>

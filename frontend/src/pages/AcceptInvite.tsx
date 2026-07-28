@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useAuth } from "../auth";
+import { PasswordInput } from "../components/PasswordInput";
 
 export default function AcceptInvite() {
   const navigate = useNavigate();
@@ -148,7 +149,7 @@ export default function AcceptInvite() {
                   </div>
                   <div>
                     <label className="mb-1.5 block text-sm font-medium text-fg-soft">Password</label>
-                    <input className="input" type="password" placeholder="••••••••" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} required autoComplete="current-password" />
+                    <PasswordInput className="input" placeholder="••••••••" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} required autoComplete="current-password" />
                   </div>
                   <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
                     {busy ? "Signing in…" : "Sign in & join"}
@@ -166,11 +167,11 @@ export default function AcceptInvite() {
                   </div>
                   <div>
                     <label className="mb-1.5 block text-sm font-medium text-fg-soft">Password</label>
-                    <input className="input" type="password" placeholder="Min. 8 characters" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+                    <PasswordInput className="input" placeholder="Min. 8 characters" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
                   </div>
                   <div>
                     <label className="mb-1.5 block text-sm font-medium text-fg-soft">Confirm password</label>
-                    <input className="input" type="password" placeholder="••••••••" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" />
+                    <PasswordInput className="input" placeholder="••••••••" value={confirm} onChange={(e) => setConfirm(e.target.value)} required autoComplete="new-password" />
                   </div>
                   <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
                     {busy ? "Creating account…" : "Create account & join"}

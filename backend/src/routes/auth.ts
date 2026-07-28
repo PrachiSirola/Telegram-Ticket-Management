@@ -19,7 +19,7 @@ import {
 } from "../lib/login.js";
 import { InvalidOtpError, requestSignup, resendSignupOtp, verifySignup } from "../lib/signup.js";
 import { MIN_PASSWORD_LENGTH } from "../lib/password.js";
-import { passwordResetEmail, sendEmail, signupOtpEmail } from "../lib/email.js";
+import { passwordResetEmail, sendEmail, signupOtpEmail, welcomeEmail } from "../lib/email.js";
 import { requireAuth } from "../middleware/auth.js";
 
 export const authRouter = Router();
@@ -90,6 +90,9 @@ authRouter.post("/signup/verify", authLimiter, async (req, res) => {
   try {
     const user = await verifySignup(parsed.data.email, parsed.data.code);
     setSessionCookie(res, user.id);
+    // Send welcome email (fire-and-forget)
+    const welcome = welcomeEmail(user.name, env.frontendUrl);
+    sendEmail({ ...welcome, to: user.email });
     res.status(201).json({ ok: true });
   } catch (err) {
     if (err instanceof InvalidOtpError) return res.status(400).json({ error: err.message });
@@ -163,7 +166,7 @@ authRouter.get("/me", requireAuth, async (req, res) => {
 
 // Tells the frontend which optional auth features are available.
 authRouter.get("/config", (_req, res) => {
-  res.json({ passwordReset: env.email.enabled });
+  res.json({ passwordReset: true });
 });
 
 // ---------------------------------------------------------------------------

@@ -21,12 +21,11 @@ export const env = {
   // Transactional email (signup OTPs, password-reset links).
   // Driver precedence: SMTP_URL (local Mailpit) → RESEND_API_KEY → console log.
   email: {
-    smtpUrl: process.env.SMTP_URL ?? "", // e.g. smtp://localhost:1025 (Mailpit)
-    resendApiKey: process.env.RESEND_API_KEY ?? "",
-    from: process.env.EMAIL_FROM ?? "Tickets <onboarding@resend.dev>",
-    get enabled() {
-      return Boolean(this.smtpUrl || this.resendApiKey);
-    },
+    host: process.env.SMTP_HOST ?? "smtp.gmail.com",
+    port: Number(process.env.SMTP_PORT ?? 587),
+    user: process.env.SMTP_USER ?? "",
+    pass: process.env.SMTP_PASS ?? "",
+    from: process.env.SMTP_FROM ?? "Tickets <noreply@example.com>",
   },
 
   // Attachments (local disk for now; swap to S3/R2 for production PaaS).

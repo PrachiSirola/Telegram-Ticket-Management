@@ -7,8 +7,9 @@ import { Avatar } from "./ui";
 import { Dropdown } from "./Dropdown";
 import { NotificationsBell } from "./NotificationsBell";
 import { AppShell } from "./layout";
-import { IconLogOut } from "./Icons";
-import type { ReactNode } from "react";
+import { IconLogOut, IconAlertTriangle } from "./Icons";
+import { Modal } from "./Modal";
+import { useState, type ReactNode } from "react";
 
 export function Layout({ children }: { children: ReactNode }) {
   const { me, logout } = useAuth();
@@ -16,6 +17,7 @@ export function Layout({ children }: { children: ReactNode }) {
 
   const navigate = useNavigate();
   const { pathname } = useLocation();
+  const [showLogout, setShowLogout] = useState(false);
 
   const { data: projects } = useQuery({
     queryKey: ["projects", activeOrgId],
@@ -111,10 +113,7 @@ export function Layout({ children }: { children: ReactNode }) {
           )}
 
           <button
-            onClick={async () => {
-              await logout();
-              navigate("/login");
-            }}
+            onClick={() => setShowLogout(true)}
             className="btn btn-secondary btn-sm"
             title="Log out"
           >
@@ -125,6 +124,32 @@ export function Layout({ children }: { children: ReactNode }) {
       }
     >
       {children}
+
+      <Modal open={showLogout} onClose={() => setShowLogout(false)} title="Log out?" width={380}>
+        <div className="mb-4 flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-warn/10 text-warn">
+            <IconAlertTriangle size={20} />
+          </div>
+          <p className="text-sm text-fg-soft">
+            Are you sure you want to log out? You'll need to sign in again to access your workspace.
+          </p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button className="btn btn-secondary btn-sm" onClick={() => setShowLogout(false)}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={async () => {
+              await logout();
+              navigate("/login");
+            }}
+          >
+            <IconLogOut size={15} />
+            Log out
+          </button>
+        </div>
+      </Modal>
     </AppShell>
   );
 }

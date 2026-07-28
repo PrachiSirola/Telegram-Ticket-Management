@@ -4,6 +4,7 @@ import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { canAccessOrg, isClient, membershipIn } from "../lib/access.js";
 import { hashPassword, MIN_PASSWORD_LENGTH, verifyPassword } from "../lib/password.js";
+import { passwordChangedEmail, sendEmail } from "../lib/email.js";
 
 export const meRouter = Router();
 
@@ -45,6 +46,9 @@ meRouter.post("/change-password", requireAuth, async (req, res) => {
     where: { id: current.id },
     data: { passwordHash: await hashPassword(parsed.data.newPassword) },
   });
+  // Send confirmation email (fire-and-forget)
+  const mail = passwordChangedEmail(current.name);
+  sendEmail({ ...mail, to: current.email });
   res.json({ ok: true });
 });
 

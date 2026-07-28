@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { useAuth } from "../auth";
+import { PasswordInput } from "../components/PasswordInput";
 
 export default function Signup() {
   const navigate = useNavigate();
@@ -13,6 +14,7 @@ export default function Signup() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -20,6 +22,10 @@ export default function Signup() {
   async function submitForm(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
+    if (password !== confirmPw) {
+      setErr("Passwords don't match.");
+      return;
+    }
     setBusy(true);
     try {
       await api.signup({ orgName, name, email, password });
@@ -59,7 +65,7 @@ export default function Signup() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 overflow-hidden">
-        <div className="pointer-events-none absolute inset-0" style={{ backgroundImage: "url(/backgroundimage2.jpeg)", backgroundSize: "cover", backgroundPosition: "center", opacity: 0.15, filter: "blur(1.5px) saturate(1.5)" }} />
+        <div className="pointer-events-none absolute inset-0" style={{ backgroundImage: "url(/backgroundimage2.jpeg)", backgroundSize: "cover", backgroundPosition: "center", opacity: 0.05, filter: "blur(2px) saturate(0.5)" }} />
       <div className="relative z-10 w-full max-w-sm">
         <div className="mb-8 text-center">
           <div
@@ -93,7 +99,11 @@ export default function Signup() {
                 </div>
                 <div>
                   <label className="mb-1.5 block text-sm font-medium text-fg-soft">Password</label>
-                  <input className="input" type="password" placeholder="Min. 8 characters" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+                  <PasswordInput className="input" placeholder="Min. 8 characters" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-fg-soft">Confirm password</label>
+                  <PasswordInput className="input" placeholder="Re-enter password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} required minLength={8} autoComplete="new-password" />
                 </div>
                 <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
                   {busy ? "Sending code…" : "Continue"}
