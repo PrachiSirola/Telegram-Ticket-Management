@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useAuth } from "../auth";
-import { PasswordInput } from "../components/PasswordInput";
+//import { PasswordInput } from "../components/PasswordInput";
 
 export default function Login() {
   const navigate = useNavigate();
