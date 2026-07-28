@@ -18,8 +18,7 @@ export const env = {
 
   frontendUrl: process.env.FRONTEND_URL ?? "http://localhost:1020",
 
-  // Transactional email (signup OTPs, password-reset links).
-  // Driver precedence: SMTP_URL (local Mailpit) → RESEND_API_KEY → console log.
+  
   email: {
     host: process.env.SMTP_HOST ?? "smtp.gmail.com",
     port: Number(process.env.SMTP_PORT ?? 587),

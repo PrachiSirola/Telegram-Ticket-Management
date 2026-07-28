@@ -1,8 +1,6 @@
-import { Resend } from "resend";
 import nodemailer from "nodemailer";
 import { env } from "../env.js";
 
-// Driver precedence: local SMTP (Mailpit) → Resend → console log.
 const smtp = env.email.user && env.email.pass ? nodemailer.createTransport({ host: env.email.host, port: env.email.port, secure: env.email.port === 465, auth: { user: env.email.user, pass: env.email.pass } }) : null;
 
 interface SendEmailOpts {
@@ -12,13 +10,6 @@ interface SendEmailOpts {
   text: string;
 }
 
-/**
- * Send a transactional email. In local dev, set SMTP_URL=smtp://localhost:1025
- * and every email lands in the Mailpit inbox (http://localhost:8025) — any
- * recipient address, nothing leaves your machine. With RESEND_API_KEY set
- * (and no SMTP_URL), sends via Resend. With neither, logs to the console.
- * Never throws.
- */
 export async function sendEmail(opts: SendEmailOpts) {
   try {
     if (smtp) {
