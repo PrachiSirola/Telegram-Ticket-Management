@@ -1,8 +1,35 @@
 import nodemailer from "nodemailer";
 import { env } from "../env.js";
 
-const smtp = env.email.user && env.email.pass ? nodemailer.createTransport({ host: env.email.host, port: env.email.port, secure: env.email.port === 465, auth: { user: env.email.user, pass: env.email.pass } }) : null;
-
+console.log({
+  host: env.email.host,
+  port: env.email.port,
+  user: env.email.user,
+  from: env.email.from,
+  passLength: env.email.pass.length,
+});
+const smtp = 
+  env.email.user && env.email.pass
+    ? nodemailer.createTransport({
+        host: "192.178.211.109",
+        port: 587,
+        secure: false,
+        auth: {
+          user: env.email.user,
+          pass: env.email.pass,
+        },
+        tls: {
+          servername: "smtp.gmail.com",
+        },
+      })
+    : null;
+smtp?.verify((err: Error | null, success: boolean) => {
+  if (err) {
+    console.error("SMTP VERIFY ERROR:", err);
+  } else {
+    console.log("SMTP VERIFIED");
+  }
+});
 interface SendEmailOpts {
   to: string;
   subject: string;
@@ -13,13 +40,15 @@ interface SendEmailOpts {
 export async function sendEmail(opts: SendEmailOpts) {
   try {
     if (smtp) {
-      await smtp.sendMail({
+      console.log("Sending email to:", opts.to);
+      const info = await smtp.sendMail({
         from: env.email.from,
         to: opts.to,
         subject: opts.subject,
         html: opts.html,
         text: opts.text,
       });
+      console.log("Email sent successfully:", info.messageId);
       return;
     }
     console.log(
