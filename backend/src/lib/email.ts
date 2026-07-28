@@ -14,12 +14,6 @@ const smtp =
         host: "192.178.211.109",
         port: 587,
         secure: false,
-        pool: true,
-        maxConnections: 2,
-        maxMessages: 100,
-        connectionTimeout: 30000,
-        greetingTimeout: 30000,
-        socketTimeout: 60000,
         auth: {
           user: env.email.user,
           pass: env.email.pass,
@@ -46,21 +40,25 @@ interface SendEmailOpts {
 export async function sendEmail(opts: SendEmailOpts) {
   try {
     if (smtp) {
-      console.log("Sending email to:", opts.to);
-      const info = await smtp.sendMail({
-        from: env.email.from,
-        to: opts.to,
-        subject: opts.subject,
-        html: opts.html,
-        text: opts.text,
-      });
-      console.log("Email sent successfully:", info.messageId);
+      console.log("SMTP transporter not available");
       return;
     }
-    console.log(
-      `\n[email:console] to=${opts.to} subject="${opts.subject}"\n${opts.text}\n`,
-    );
-  } catch (err) {
+    console.log("Verifying SMTP...");
+    await smtp.verify();
+    console.log("SMTP verified successfully.");
+
+    console.log("Sending email to:", opts.to);
+
+    const info = await smtp.sendMail({
+      from: env.email.from,
+      to: opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text,
+    });
+    console.log("Email sent successfully:", info.messageId);
+    return;
+  }catch (err) {
     console.error("[email] send error:", err);
   }
 }
