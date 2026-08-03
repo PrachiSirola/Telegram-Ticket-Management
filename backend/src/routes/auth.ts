@@ -166,7 +166,7 @@ authRouter.get("/me", requireAuth, async (req, res) => {
 
 // Tells the frontend which optional auth features are available.
 authRouter.get("/config", (_req, res) => {
-  res.json({ passwordReset: true });
+  res.json({ passwordReset: env.email.enabled });
 });
 
 // ---------------------------------------------------------------------------
@@ -250,8 +250,10 @@ authRouter.post("/reset-password", authLimiter, async (req, res) => {
     return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
   }
   try {
-    const user = await resetPasswordWithToken(parsed.data.token, parsed.data.password);
-    setSessionCookie(res, user.id);
+    await resetPasswordWithToken(parsed.data.token, parsed.data.password);
+    // Deliberately not calling setSessionCookie here — after a reset,
+    // the user should see a success message and sign in fresh, not be
+    // silently logged into a new session.
     res.json({ ok: true });
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });

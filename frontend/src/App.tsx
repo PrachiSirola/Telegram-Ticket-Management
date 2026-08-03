@@ -23,6 +23,16 @@ export default function App() {
     return <div className="flex min-h-screen items-center justify-center text-slate-400">Loading…</div>;
   }
 
+  // Reachable regardless of session state: a reset-password email link may
+  // be opened in a browser that still has an active session from before.
+  if (window.location.pathname === "/reset-password") {
+    return (
+      <Routes>
+        <Route path="/reset-password" element={<ResetPassword />} />
+      </Routes>
+    );
+  }
+
   if (!me) {
     return (
       <Routes>
@@ -30,7 +40,6 @@ export default function App() {
         <Route path="/signup" element={<Signup />} />
         <Route path="/accept-invite" element={<AcceptInvite />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
-        <Route path="/reset-password" element={<ResetPassword />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     );
