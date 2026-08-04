@@ -58,3 +58,16 @@ export const isInternalIn = (me: Me | null, orgId: string) => {
 };
 
 export const isClientIn = (me: Me | null, orgId: string) => roleInOrg(me, orgId) === "CLIENT";
+
+/**
+ * Only users who currently hold SUPER_ADMIN, ADMIN, or CLIENT in at least
+ * one of their org memberships may create a new organisation. A user whose
+ * memberships are all DEVELOPER — or who has none at all — cannot; they
+ * need an invite instead. This mirrors the backend check in
+ * routes/orgs.ts exactly; the backend is the authoritative enforcement,
+ * this is just so the UI doesn't show an option that would be rejected.
+ */
+export const canCreateOrg = (me: Me | null) =>
+  Boolean(
+    me?.memberships.some((m) => m.role === "SUPER_ADMIN" || m.role === "ADMIN" || m.role === "CLIENT"),
+  );

@@ -11,6 +11,7 @@ import type {
   OrgInvite,
   OrgMember,
   OrgSettings,
+  Paged,
   Project,
   Ticket,
   TicketPriority,
@@ -79,6 +80,13 @@ export const api = {
   // --- Members ---
   orgMembers: (orgId: string) =>
     http.get<OrgMember[]>(`/orgs/${orgId}/members`).then((r) => r.data),
+  // Opt-in pagination, same convention as projectsPaged above. Used by the
+  // Members page's list; OrgSettings' ownership-transfer picker keeps using
+  // orgMembers() for the complete list.
+  orgMembersPaged: (orgId: string, params: { page: number; pageSize: number }) =>
+    http
+      .get<Paged<OrgMember>>(`/orgs/${orgId}/members`, { params })
+      .then((r) => r.data),
   updateMember: (
     orgId: string,
     userId: string,
@@ -100,6 +108,14 @@ export const api = {
   // --- Projects ---
   projects: (orgId: string) =>
     http.get<Project[]>(`/orgs/${orgId}/projects`).then((r) => r.data),
+  // Opt-in pagination: same endpoint, but passing page/pageSize gets back a
+  // { items, total, page, pageSize } envelope instead of the plain array.
+  // Used by the Dashboard's paginated project grid; every other caller keeps
+  // using `projects()` above and is unaffected.
+  projectsPaged: (orgId: string, params: { page: number; pageSize: number }) =>
+    http
+      .get<Paged<Project>>(`/orgs/${orgId}/projects`, { params })
+      .then((r) => r.data),
   createProject: (orgId: string, data: { name: string; description?: string }) =>
     http.post<Project>(`/orgs/${orgId}/projects`, data).then((r) => r.data),
   updateProject: (orgId: string, projectId: string, data: { name?: string; description?: string }) =>
@@ -110,6 +126,10 @@ export const api = {
     http.get<Member[]>(`/orgs/${orgId}/projects/${projectId}/members`).then((r) => r.data),
   setProjectClients: (orgId: string, projectId: string, membershipIds: string[]) =>
     http.put(`/orgs/${orgId}/projects/${projectId}/clients`, { membershipIds }).then((r) => r.data),
+  setProjectDevelopers: (orgId: string, projectId: string, membershipIds: string[]) =>
+    http
+      .put(`/orgs/${orgId}/projects/${projectId}/developers`, { membershipIds })
+      .then((r) => r.data),
 
   // --- Tickets ---
   tickets: (orgId: string, projectId: string, params?: Record<string, string>) =>

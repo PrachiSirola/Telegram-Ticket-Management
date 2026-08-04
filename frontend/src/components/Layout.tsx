@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { isAdminOrAboveIn, useAuth } from "../auth";
+import { isAdminOrAboveIn, canCreateOrg, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { Avatar } from "./ui";
 import { Dropdown } from "./Dropdown";
@@ -63,10 +63,14 @@ export function Layout({ children }: { children: ReactNode }) {
                 value: o.id,
                 label: o.name,
               })),
-              {
-                value: "__create__",
-                label: "+ New organisation",
-              },
+              ...(canCreateOrg(me)
+                ? [
+                    {
+                      value: "__create__",
+                      label: "+ New organisation",
+                    },
+                  ]
+                : []),
             ]}
           />
 
@@ -76,6 +80,8 @@ export function Layout({ children }: { children: ReactNode }) {
             placeholder="Project"
             value={currentProject}
             onChange={(id) => navigate(`/projects/${id}`)}
+            searchable
+            searchPlaceholder="Search projects…"
             options={(projects ?? []).map((p) => ({
               value: p.id,
               label: p.name,

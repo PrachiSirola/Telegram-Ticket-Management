@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -6,6 +6,7 @@ import { isAdminOrAboveIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
 import { ConfirmModal } from "../components/ConfirmModal";
+import { Pagination } from "../components/Pagination";
 import { IconFolder, IconPlus, IconArrowRight, IconTrash } from "../components/Icons";
 import type { Project } from "../types";
 
@@ -193,21 +194,46 @@ const PROJECT_COLORS = [
   { bg: "#f0ece8", icon: "#7a5030", border: "#d8cec2" },
 ];
 
+const PROJECTS_PAGE_SIZE = 18; // 3 columns × 6 rows
+
 function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boolean }) {
   const qc = useQueryClient();
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [delProject, setDelProject] = useState<Project | null>(null);
-  const { data: projects } = useQuery({ queryKey: ["projects", orgId], queryFn: () => api.projects(orgId), enabled: !!orgId });
+  const [page, setPage] = useState(1);
+
+  const { data: paged, isLoading } = useQuery({
+    queryKey: ["projects", orgId, "paged", page],
+    queryFn: () => api.projectsPaged(orgId, { page, pageSize: PROJECTS_PAGE_SIZE }),
+    enabled: !!orgId,
+  });
+  const projects = paged?.items;
+
   const create = useMutation({
     mutationFn: () => api.createProject(orgId, { name, description: description || undefined }),
-    onSuccess: () => { setName(""); setDescription(""); setShowForm(false); qc.invalidateQueries({ queryKey: ["projects", orgId] }); },
+    onSuccess: () => {
+      setName("");
+      setDescription("");
+      setShowForm(false);
+      setPage(1); // a newly created project sorts alphabetically — safest to land back on page 1
+      qc.invalidateQueries({ queryKey: ["projects", orgId] });
+    },
   });
   const del = useMutation({
     mutationFn: (projectId: string) => api.deleteProject(orgId, projectId),
-    onSuccess: () => { setDelProject(null); qc.invalidateQueries({ queryKey: ["projects", orgId] }); },
+    onSuccess: () => {
+      setDelProject(null);
+      qc.invalidateQueries({ queryKey: ["projects", orgId] });
+    },
   });
+
+  // If deleting the last project on a page empties it (and it's not page 1),
+  // step back a page rather than showing a stranded empty page.
+  useEffect(() => {
+    if (paged && paged.items.length === 0 && page > 1) setPage(page - 1);
+  }, [paged, page]);
 
   return (
     <section>
@@ -235,7 +261,7 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
         </div>
       )}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {projects?.length === 0 && (
+        {!isLoading && projects?.length === 0 && (
           <div className="card px-8 py-12 text-center sm:col-span-2 lg:col-span-3">
             <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-accent text-primary"><IconFolder size={20} /></div>
             <p className="text-sm font-medium text-fg-soft">No projects yet{canManage ? " — create one to get started." : "."}</p>
@@ -266,6 +292,14 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
           );
         })}
       </div>
+      {paged && (
+        <Pagination
+          page={paged.page}
+          total={paged.total}
+          pageSize={paged.pageSize}
+          onPageChange={setPage}
+        />
+      )}
       <ConfirmModal open={!!delProject} title="Delete project?" message={<>This permanently deletes <span className="font-medium">"{delProject?.name}"</span> and all of its tickets, comments, and attachments.</>} pending={del.isPending} onConfirm={() => del.mutate(delProject!.id)} onClose={() => setDelProject(null)} />
     </section>
   );

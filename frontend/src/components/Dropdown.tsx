@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { matchWords } from "../lib/search";
 
 export interface DropdownOption {
   value: string;
@@ -34,6 +35,8 @@ export function Dropdown({
   size = "md",
   align = "left",
   disabled = false,
+  searchable = false,
+  searchPlaceholder = "Search…",
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -43,10 +46,22 @@ export function Dropdown({
   size?: "sm" | "md";
   align?: "left" | "right";
   disabled?: boolean;
+  /** Adds a search box at the top of the menu, filtering options by
+   *  word-prefix match (see lib/search.ts) instead of showing the full
+   *  list. Off by default — only opt in where explicitly wanted (e.g. the
+   *  project switcher), so every other existing Dropdown usage is
+   *  unaffected. */
+  searchable?: boolean;
+  searchPlaceholder?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const ref = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const selected = options.find((o) => o.value === value && o.value !== "");
+
+  const visibleOptions =
+    searchable && query.trim() ? options.filter((o) => matchWords(o.label, query)) : options;
 
   useEffect(() => {
     if (!open) return;
@@ -66,6 +81,14 @@ export function Dropdown({
     };
   }, [open]);
 
+  useEffect(() => {
+    if (open && searchable) {
+      // Focus the search box as soon as the menu opens.
+      requestAnimationFrame(() => searchRef.current?.focus());
+    }
+    if (!open) setQuery("");
+  }, [open, searchable]);
+
   return (
     <div ref={ref} className={`relative ${className}`}>
       <button
@@ -83,20 +106,38 @@ export function Dropdown({
         <div
           className={`dd-menu absolute z-30 mt-1 min-w-full ${align === "right" ? "right-0" : "left-0"}`}
         >
-          {options.map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              disabled={o.disabled}
-              onClick={() => {
-                onChange(o.value);
-                setOpen(false);
-              }}
-              className={`dd-option ${o.value === value ? "selected" : ""}`}
-            >
-              {o.label}
-            </button>
-          ))}
+          {searchable && (
+            <div className="border-b border-line p-2">
+              <input
+                ref={searchRef}
+                type="text"
+                className="input"
+                style={{ padding: "6px 10px", fontSize: 13 }}
+                placeholder={searchPlaceholder}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.stopPropagation()}
+              />
+            </div>
+          )}
+          {visibleOptions.length === 0 ? (
+            <div className="px-4 py-3 text-sm text-muted">No matches</div>
+          ) : (
+            visibleOptions.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                disabled={o.disabled}
+                onClick={() => {
+                  onChange(o.value);
+                  setOpen(false);
+                }}
+                className={`dd-option ${o.value === value ? "selected" : ""}`}
+              >
+                {o.label}
+              </button>
+            ))
+          )}
         </div>
       )}
     </div>

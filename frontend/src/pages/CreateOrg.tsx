@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { useAuth } from "../auth";
+import { canCreateOrg, useAuth } from "../auth";
 import { useOrg } from "../org";
 
 export default function CreateOrg() {
@@ -15,6 +15,7 @@ export default function CreateOrg() {
   const [busy, setBusy] = useState(false);
 
   const firstOrg = orgs.length === 0;
+  const qualifies = canCreateOrg(me);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -85,14 +86,21 @@ export default function CreateOrg() {
             className="text-2xl font-bold tracking-tight text-fg"
             style={{ fontFamily: 'var(--font-display)' }}
           >
-            {firstOrg ? "You're not in any organisation" : "New organisation"}
+            {!qualifies
+              ? "You're not in any organisation"
+              : firstOrg
+                ? "You're not in any organisation"
+                : "New organisation"}
           </h1>
           <p className="mb-6 mt-2 text-sm leading-relaxed text-fg-soft">
-            {firstOrg
-              ? "Create one to get started — you'll be its Super Admin. Or ask an administrator for an invite link."
-              : "You'll be the new organisation's Super Admin."}
+            {!qualifies
+              ? "Only Super Admins, Admins, or Clients can create an organisation. Ask your administrator for an invite link to join one."
+              : firstOrg
+                ? "Create one to get started — you'll be its Super Admin. Or ask an administrator for an invite link."
+                : "You'll be the new organisation's Super Admin."}
           </p>
 
+          {qualifies && (
           <form onSubmit={submit} className="grid gap-5">
             <div>
               <label className="mb-1.5 block text-sm font-medium text-fg-soft">
@@ -113,6 +121,7 @@ export default function CreateOrg() {
               {busy ? "Creating…" : "Create organisation"}
             </button>
           </form>
+          )}
 
           {err && <p className="mt-3 text-sm text-danger">{err}</p>}
         </div>

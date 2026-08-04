@@ -126,6 +126,22 @@ async function consumeInvite(tx: Prisma.TransactionClient, invite: Invite, userI
       });
     }
   }
+  // Developers may optionally be pre-attached to projects at invite time too
+  // (unlike clients, this is optional — a developer can still gain access to
+  // other projects later purely via ticket assignment; see lib/projectAccess.ts).
+  if (invite.role === "DEVELOPER" && invite.projectIds.length) {
+    const projects = await tx.project.findMany({
+      where: { id: { in: invite.projectIds }, orgId: invite.orgId },
+      select: { id: true },
+    });
+    for (const p of projects) {
+      await tx.projectDeveloper.upsert({
+        where: { projectId_membershipId: { projectId: p.id, membershipId: membership.id } },
+        update: {},
+        create: { projectId: p.id, membershipId: membership.id },
+      });
+    }
+  }
   await tx.invite.update({ where: { id: invite.id }, data: { status: "ACCEPTED" } });
 }
 

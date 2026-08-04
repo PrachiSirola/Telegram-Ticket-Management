@@ -5,6 +5,14 @@ export type TicketPriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
 export type TicketType = "BUG" | "FEATURE" | "TASK";
 export type CommentVisibility = "INTERNAL" | "CLIENT_VISIBLE";
 
+/** Envelope shape for opt-in server-side pagination (projects, org members). */
+export interface Paged<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export interface Me {
   id: string;
   email: string;

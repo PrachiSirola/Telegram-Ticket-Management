@@ -70,6 +70,10 @@ invitesRouter.post(
     }
 
     // Clients must be attached to at least one project of THIS org.
+    // Developers may optionally be pre-attached to projects too (not
+    // required — a developer can also gain access later via ticket
+    // assignment, see lib/projectAccess.ts), but any ids they do provide
+    // still need to be validated the same way.
     let projectIds: string[] = [];
     if (role === "CLIENT") {
       projectIds = [...new Set(parsed.data.projectIds ?? [])];
@@ -82,6 +86,17 @@ invitesRouter.post(
       });
       if (found.length !== projectIds.length) {
         return res.status(400).json({ error: "One or more projects don't exist in this org" });
+      }
+    } else if (role === "DEVELOPER") {
+      projectIds = [...new Set(parsed.data.projectIds ?? [])];
+      if (projectIds.length > 0) {
+        const found = await prisma.project.findMany({
+          where: { id: { in: projectIds }, orgId },
+          select: { id: true },
+        });
+        if (found.length !== projectIds.length) {
+          return res.status(400).json({ error: "One or more projects don't exist in this org" });
+        }
       }
     }
 

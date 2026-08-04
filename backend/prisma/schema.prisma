@@ -119,6 +119,7 @@ model OrgMembership {
   org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   projectAccess ProjectClient[]
+  projectDevAccess ProjectDeveloper[]
 
   @@unique([userId, orgId])
   @@index([userId])
@@ -136,6 +137,7 @@ model Project {
   org     Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
   tickets Ticket[]
   clients ProjectClient[]
+  developers ProjectDeveloper[]
 
   @@index([orgId])
 }
@@ -143,6 +145,24 @@ model Project {
 // Attaches a CLIENT membership to a project. Clients only see projects they
 // are attached to; internal roles (SA/ADMIN/DEVELOPER) see all org projects.
 model ProjectClient {
+  id           String   @id @default(cuid())
+  projectId    String
+  membershipId String
+  createdAt    DateTime @default(now())
+
+  project    Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  membership OrgMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, membershipId])
+  @@index([membershipId])
+}
+
+// Explicit developer-to-project assignment. A DEVELOPER sees a project if
+// EITHER they're attached here OR they have a ticket assigned to them in it
+// (see lib/projectAccess.ts) — this table covers the "attached ahead of any
+// ticket" case, e.g. right after being invited to a project with no tickets
+// yet assigned. Mirrors ProjectClient's shape deliberately.
+model ProjectDeveloper {
   id           String   @id @default(cuid())
   projectId    String
   membershipId String

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -6,9 +6,12 @@ import { isAdminOrAboveIn, isOrgSA, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Dropdown, MultiDropdown } from "../components/Dropdown";
+import { Pagination } from "../components/Pagination";
 import { Avatar } from "../components/ui";
 import { IconPlus } from "../components/Icons";
 import type { OrgMember } from "../types";
+
+const MEMBERS_PAGE_SIZE = 10;
 
 export default function Members() {
   const { me } = useAuth();
@@ -18,11 +21,14 @@ export default function Members() {
   const sa = isOrgSA(me, activeOrgId);
   const admin = isAdminOrAboveIn(me, activeOrgId);
 
-  const { data: members } = useQuery({
-    queryKey: ["orgMembers", activeOrgId],
-    queryFn: () => api.orgMembers(activeOrgId),
+  const [page, setPage] = useState(1);
+
+  const { data: paged } = useQuery({
+    queryKey: ["orgMembers", activeOrgId, "paged", page],
+    queryFn: () => api.orgMembersPaged(activeOrgId, { page, pageSize: MEMBERS_PAGE_SIZE }),
     enabled: !!activeOrgId && admin,
   });
+  const members = paged?.items;
   const { data: invites } = useQuery({
     queryKey: ["invites", activeOrgId],
     queryFn: () => api.invites(activeOrgId),
@@ -50,6 +56,12 @@ export default function Members() {
   const resend = useMutation({
     mutationFn: (inviteId: string) => api.resendInvite(activeOrgId, inviteId),
   });
+
+  // If removing the last member on a page empties it (and it's not page 1),
+  // step back a page rather than showing a stranded empty page.
+  useEffect(() => {
+    if (paged && paged.items.length === 0 && page > 1) setPage(page - 1);
+  }, [paged, page]);
 
   if (!admin) return <Navigate to="/" replace />;
 
@@ -158,6 +170,14 @@ export default function Members() {
             {(patchMember.error as any)?.response?.data?.error ?? "Update failed."}
           </p>
         )}
+        {paged && (
+          <Pagination
+            page={paged.page}
+            total={paged.total}
+            pageSize={paged.pageSize}
+            onPageChange={setPage}
+          />
+        )}
       </section>
 
       <ConfirmModal
@@ -194,7 +214,7 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
       api.invite(orgId, {
         email: email.trim(),
         role,
-        ...(role === "CLIENT" ? { projectIds } : {}),
+        ...(role === "CLIENT" || role === "DEVELOPER" ? { projectIds } : {}),
       }),
     onSuccess: () => {
       setEmail("");
@@ -217,7 +237,7 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
           <div className="eyebrow mb-1.5">Role</div>
           <Dropdown
             value={role}
-            onChange={setRole}
+            onChange={(v) => { setRole(v); setProjectIds([]); }}
             options={[
               ...(canInviteAdmin ? [{ value: "ADMIN", label: "Admin" }] : []),
               { value: "DEVELOPER", label: "Developer" },
@@ -232,6 +252,17 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
               values={projectIds}
               onChange={setProjectIds}
               placeholder="Select projects…"
+              options={(projects ?? []).map((p) => ({ value: p.id, label: p.name }))}
+            />
+          </div>
+        )}
+        {role === "DEVELOPER" && (
+          <div className="flex-1" style={{ minWidth: 180 }}>
+            <div className="eyebrow mb-1.5">Projects (optional)</div>
+            <MultiDropdown
+              values={projectIds}
+              onChange={setProjectIds}
+              placeholder="Assign to projects…"
               options={(projects ?? []).map((p) => ({ value: p.id, label: p.name }))}
             />
           </div>
