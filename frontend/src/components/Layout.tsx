@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { isAdminOrAboveIn, canCreateOrg, useAuth } from "../auth";
+import { isAdminOrAboveIn, isDeveloperIn, canCreateOrg, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { Avatar } from "./ui";
 import { Dropdown } from "./Dropdown";
@@ -29,10 +29,12 @@ export function Layout({ children }: { children: ReactNode }) {
     pathname.match(/\/projects\/([^/]+)/)?.[1] ?? "";
 
   const admin = isAdminOrAboveIn(me, activeOrgId);
+  const developer = isDeveloperIn(me, activeOrgId);
 
   return (
     <AppShell
       admin={admin}
+      developer={developer}
       topbarLeft={
         <div className="flex items-center gap-4">
 

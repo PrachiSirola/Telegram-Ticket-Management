@@ -1,10 +1,11 @@
 import { Link, useLocation } from "react-router-dom";
-import { IconHome, IconUsers, IconSettings, IconUser } from "../Icons";
+import { IconHome, IconUsers, IconSettings, IconUser, IconTicket } from "../Icons";
 type SidebarProps = {
   admin: boolean;
+  developer: boolean;
 };
 
-export function Sidebar({ admin }: SidebarProps) {
+export function Sidebar({ admin, developer }: SidebarProps) {
   const { pathname } = useLocation();
 
   const navItem = (active: boolean) =>
@@ -47,6 +48,16 @@ export function Sidebar({ admin }: SidebarProps) {
             <IconHome size={18} />
             <span>Dashboard</span>
           </Link>
+
+          {developer && (
+            <Link
+              to="/my-work"
+              className={navItem(pathname.startsWith("/my-work"))}
+            >
+              <IconTicket size={18} />
+              <span>My Work</span>
+            </Link>
+          )}
 
           {admin && (
             <Link

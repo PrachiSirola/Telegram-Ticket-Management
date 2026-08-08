@@ -59,6 +59,11 @@ export const isInternalIn = (me: Me | null, orgId: string) => {
 
 export const isClientIn = (me: Me | null, orgId: string) => roleInOrg(me, orgId) === "CLIENT";
 
+/** Exactly DEVELOPER (not SA/Admin, even though they're also "internal") —
+ *  used to gate the "My Work" sidebar link, which is specifically a
+ *  developer-focused view of their own assignments. */
+export const isDeveloperIn = (me: Me | null, orgId: string) => roleInOrg(me, orgId) === "DEVELOPER";
+
 /**
  * Only users who currently hold SUPER_ADMIN, ADMIN, or CLIENT in at least
  * one of their org memberships may create a new organisation. A user whose

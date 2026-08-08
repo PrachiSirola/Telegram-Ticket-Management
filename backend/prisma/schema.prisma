@@ -89,6 +89,7 @@ model User {
   sentInvites     Invite[]             @relation("InvitedBy")
   attachments     Attachment[]
   passwordResets  PasswordResetToken[]
+  ticketStatusChanges TicketStatusHistory[] @relation("TicketStatusChanges")
 }
 
 model Organization {
@@ -246,9 +247,35 @@ model Ticket {
   comments      Comment[]
   notifications Notification[]
   attachments   Attachment[]
+  statusHistory TicketStatusHistory[]
 
   @@index([projectId, status])
   @@index([assigneeId])
+}
+
+// Records every status transition a ticket goes through. Written once per
+// actual change (see routes/tickets.ts's PATCH handler) — never backfilled
+// retroactively, so tickets that were already DONE before this model existed
+// have no rows here; callers that need a completion date for those fall back
+// to the ticket's `updatedAt` (see lib/myWork.ts).
+//
+// This is the actual source of truth for "when was this ticket completed" —
+// deliberately not `updatedAt`, which changes on ANY edit (title, priority,
+// due date, etc.), not just status changes, and would make "completed this
+// week" drift to "edited this week" for tickets touched after completion.
+model TicketStatusHistory {
+  id          String       @id @default(cuid())
+  ticketId    String
+  fromStatus  TicketStatus?
+  toStatus    TicketStatus
+  changedById String
+  changedAt   DateTime     @default(now())
+
+  ticket    Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  changedBy User   @relation("TicketStatusChanges", fields: [changedById], references: [id])
+
+  @@index([ticketId, changedAt])
+  @@index([toStatus, changedAt])
 }
 
 model Comment {

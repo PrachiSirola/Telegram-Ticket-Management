@@ -15,6 +15,7 @@ const PAGE_BG: Record<string, { image: string; opacity: number; blur: number }> 
   "/members":     { image: "/backgroundimage1.jpeg",  opacity: 0.15,  blur: 5 },
   "/org-settings":{ image: "/backgroundimage6.jpeg",  opacity: 0.15,  blur: 5 },
   "/tickets":     { image: "/backgroundimage1.jpeg",  opacity: 0.15, blur: 5 },
+  "/my-work":     { image: "/backgroundimage7.jpeg",  opacity: 0.15, blur: 10 },
 };
 
 const DEFAULT_BG = { image: "/backgroundimage.jpeg", opacity: 0.04, blur: 1.5 };
@@ -28,18 +29,19 @@ function getBg(pathname: string) {
 
 type Props = {
   admin: boolean;
+  developer: boolean;
   topbarLeft: ReactNode;
   topbarRight: ReactNode;
   children: ReactNode;
 };
 
-export function AppShell({ admin, topbarLeft, topbarRight, children }: Props) {
+export function AppShell({ admin, developer, topbarLeft, topbarRight, children }: Props) {
   const { pathname } = useLocation();
   const bg = getBg(pathname);
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar admin={admin} />
+      <Sidebar admin={admin} developer={developer} />
 
       <div className="relative flex min-h-screen flex-1 flex-col overflow-hidden bg-bg">
         {/* Section-specific background image */}

@@ -259,6 +259,16 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
   });
 
   if (statusChanged) {
+    // Source of truth for "when was this completed" — see the model's doc
+    // comment in schema.prisma for why this exists separately from updatedAt.
+    await prisma.ticketStatusHistory.create({
+      data: {
+        ticketId: ticket.id,
+        fromStatus: ticket.status,
+        toStatus: updated.status,
+        changedById: user.id,
+      },
+    });
     await notify({
       recipientIds: [ticket.reporterId, ticket.assigneeId ?? ""].filter(Boolean),
       type: "STATUS_CHANGED",

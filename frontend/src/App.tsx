@@ -8,6 +8,7 @@ import AcceptInvite from "./pages/AcceptInvite";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import Dashboard from "./pages/Dashboard";
+import MyWork from "./pages/MyWork";
 import Project from "./pages/Project";
 import TicketDetail from "./pages/TicketDetail";
 import Members from "./pages/Members";
@@ -61,6 +62,7 @@ export default function App() {
     <Layout>
       <Routes>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/my-work" element={<MyWork />} />
         <Route path="/projects/:projectId" element={<Project />} />
         <Route path="/tickets/:id" element={<TicketDetail />} />
         <Route path="/members" element={<Members />} />

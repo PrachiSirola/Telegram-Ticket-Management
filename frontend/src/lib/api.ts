@@ -6,6 +6,7 @@ import type {
   InviteInfo,
   Me,
   Member,
+  MyWorkResponse,
   Notification,
   Organization,
   OrgInvite,
@@ -17,6 +18,8 @@ import type {
   TicketPriority,
   TicketStatus,
   TicketType,
+  WorkRange,
+  WorkStatusFilter,
 } from "../types";
 
 const baseURL = import.meta.env.VITE_API_URL ?? "http://localhost:1019";
@@ -201,6 +204,21 @@ export const api = {
   // --- Me / notifications ---
   myTickets: (orgId: string, filter: "assigned" | "reported" = "assigned") =>
     http.get<Ticket[]>("/me/tickets", { params: { orgId, filter } }).then((r) => r.data),
+  myWork: (
+    orgId: string,
+    params: {
+      range: WorkRange;
+      from?: string;
+      to?: string;
+      status?: WorkStatusFilter;
+      projectId?: string;
+      q?: string;
+      page: number;
+      pageSize: number;
+      completedPage: number;
+      completedPageSize: number;
+    },
+  ) => http.get<MyWorkResponse>("/me/work", { params: { orgId, ...params } }).then((r) => r.data),
   notifications: () =>
     http
       .get<{ unread: number; notifications: Notification[] }>("/me/notifications")
