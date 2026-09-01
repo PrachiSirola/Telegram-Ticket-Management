@@ -1,10 +1,17 @@
 import { Router } from "express";
 import { z } from "zod";
-import type { OrgRole } from "@prisma/client";
 import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireOrgRole } from "../middleware/org.js";
-import { isOrgSA, orgRole } from "../lib/access.js";
+import { isOrgSA, orgRole, isPlatformSuperAdmin } from "../lib/access.js";
+import {
+  InvalidOrgCreationTokenError,
+  NotPlatformAdminError,
+  requestOrgCreation,
+  verifyAndCreateOrg,
+} from "../lib/orgCreation.js";
+import { orgCreationVerifyEmail, sendEmail } from "../lib/email.js";
+import { env } from "../env.js";
 
 export const orgsRouter = Router();
 
@@ -42,37 +49,46 @@ orgsRouter.get("/", requireAuth, async (req, res) => {
   );
 });
 
-// Create a new organisation — the caller becomes its Super Admin. This is the
-// path for existing accounts (open signup handles brand-new emails).
-//
-// Restricted to users who currently hold SUPER_ADMIN, ADMIN, or CLIENT in at
-// least one of their existing org memberships. A user whose memberships are
-// all DEVELOPER — or who has none at all (e.g. removed from their last org) —
-// is blocked; they need an invite instead. This intentionally checks CURRENT
-// memberships only: role history isn't tracked once a membership is deleted,
-// so "zero memberships" and "developer-only" both fall on the blocked side by
-// construction, which matches the intended strict behaviour without needing
-// any additional audit trail.
-const createSchema = z.object({ name: z.string().min(1).max(100) });
-orgsRouter.post("/", requireAuth, async (req, res) => {
-  const qualifies = req.user!.memberships.some((m) =>
-    (["SUPER_ADMIN", "ADMIN", "CLIENT"] as OrgRole[]).includes(m.role),
-  );
-  if (!qualifies) {
+// Create a new organisation — a two-step, email-confirmed flow restricted to
+// the single fixed platform Super Admin (see lib/access.ts isPlatformSuperAdmin).
+// Ordinary org SUPER_ADMIN/ADMIN/CLIENT roles no longer qualify — this is not
+// self-service. Step 1 here just sends the confirmation email; the org is
+// only actually created once that link is clicked (see /create/verify below).
+const createRequestSchema = z.object({ name: z.string().min(1).max(100) });
+orgsRouter.post("/create/request", requireAuth, async (req, res) => {
+  if (!isPlatformSuperAdmin(req.user!)) {
     return res.status(403).json({
-      error: "Only Super Admins, Admins, or Clients can create organisations. Ask your administrator for an invite.",
+      error: "Only the platform Super Admin can create organisations.",
     });
   }
-  const parsed = createSchema.safeParse(req.body);
+  const parsed = createRequestSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Organisation name is required." });
-  const org = await prisma.$transaction(async (tx) => {
-    const created = await tx.organization.create({ data: { name: parsed.data.name.trim() } });
-    await tx.orgMembership.create({
-      data: { userId: req.user!.id, orgId: created.id, role: "SUPER_ADMIN" },
-    });
-    return created;
-  });
-  res.status(201).json({ id: org.id, name: org.name, role: "SUPER_ADMIN" });
+
+  try {
+    const { token } = await requestOrgCreation(req.user!, parsed.data.name);
+    const verifyUrl = `${env.frontendUrl}/create-org/verify?token=${token}`;
+    const mail = orgCreationVerifyEmail(req.user!.name, parsed.data.name.trim(), verifyUrl);
+    await sendEmail({ ...mail, to: req.user!.email });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof NotPlatformAdminError) return res.status(403).json({ error: err.message });
+    throw err;
+  }
+});
+
+// Step 2: consumes the emailed link and actually creates the organisation.
+const createVerifySchema = z.object({ token: z.string().min(1) });
+orgsRouter.post("/create/verify", requireAuth, async (req, res) => {
+  const parsed = createVerifySchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Missing verification token." });
+  try {
+    const { org } = await verifyAndCreateOrg(parsed.data.token);
+    res.status(201).json({ id: org.id, name: org.name, role: "SUPER_ADMIN" });
+  } catch (err) {
+    if (err instanceof InvalidOrgCreationTokenError) return res.status(400).json({ error: err.message });
+    if (err instanceof NotPlatformAdminError) return res.status(403).json({ error: err.message });
+    throw err;
+  }
 });
 
 // Org settings (name, Telegram). Super Admin only. Bot token is write-only:
@@ -184,8 +200,21 @@ orgsRouter.get(
   requireAuth,
   requireOrgAccess,
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
-  async (req, res) => {
-    const where = { orgId: req.params.orgId };
+    async (req, res) => {
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const where = {
+      orgId: req.params.orgId,
+      ...(q
+        ? {
+            user: {
+              OR: [
+                { name: { contains: q, mode: "insensitive" as const } },
+                { email: { contains: q, mode: "insensitive" as const } },
+              ],
+            },
+          }
+        : {}),
+    };
     const include = {
       user: { select: { id: true, name: true, email: true, avatarUrl: true } },
       projectAccess: { select: { projectId: true } },
@@ -225,6 +254,128 @@ orgsRouter.get(
       prisma.orgMembership.count({ where }),
     ]);
     res.json({ items: items.map(serializeMember), total, page, pageSize });
+  },
+);
+
+
+const ticketUserSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
+const memberTicketInclude = {
+  assignee: ticketUserSelect,
+  reporter: ticketUserSelect,
+  project: { select: { id: true, name: true, orgId: true } },
+};
+function serializeMemberTicket(t: any) {
+  return {
+    id: t.id,
+    projectId: t.projectId,
+    orgId: t.project?.orgId,
+    project: t.project ? { id: t.project.id, name: t.project.name } : undefined,
+    title: t.title,
+    status: t.status,
+    priority: t.priority,
+    type: t.type,
+    dueDate: t.dueDate,
+    assignee: t.assignee ?? null,
+    reporter: t.reporter ?? null,
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+  };
+}
+
+// Single member's profile view: their role/status plus which projects they
+// have access to and how their assigned tickets break down by status.
+// SA/Admin implicitly have every org project; Developer/Client access is
+// explicit (ProjectDeveloper/ProjectClient), so both tables are checked.
+orgsRouter.get(
+  "/:orgId/members/:userId/detail",
+  requireAuth,
+  requireOrgAccess,
+  requireOrgRole("SUPER_ADMIN", "ADMIN"),
+  async (req, res) => {
+    const orgId = req.params.orgId;
+    const membership = await prisma.orgMembership.findUnique({
+      where: { userId_orgId: { userId: req.params.userId, orgId } },
+      include: { user: { select: { id: true, name: true, email: true, avatarUrl: true } } },
+    });
+    if (!membership) return res.status(404).json({ error: "Member not found" });
+
+    const projects =
+      membership.role === "SUPER_ADMIN" || membership.role === "ADMIN"
+        ? await prisma.project.findMany({ where: { orgId }, select: { id: true, name: true }, orderBy: { name: "asc" } })
+        : await prisma.project.findMany({
+            where: {
+              orgId,
+              OR: [
+                { developers: { some: { membershipId: membership.id } } },
+                { clients: { some: { membershipId: membership.id } } },
+              ],
+            },
+            select: { id: true, name: true },
+            orderBy: { name: "asc" },
+          });
+
+    const counts = await prisma.ticket.groupBy({
+      by: ["status"],
+      where: { assigneeId: membership.userId, project: { orgId } },
+      _count: true,
+    });
+    const ticketCounts = { OPEN: 0, IN_PROGRESS: 0, DONE: 0 };
+    let total = 0;
+    for (const c of counts) {
+      ticketCounts[c.status as keyof typeof ticketCounts] = c._count;
+      total += c._count;
+    }
+
+    res.json({
+      userId: membership.user.id,
+      name: membership.user.name,
+      email: membership.user.email,
+      avatarUrl: membership.user.avatarUrl,
+      role: membership.role,
+      disabled: membership.disabled,
+      createdAt: membership.createdAt,
+      projects,
+      ticketCounts: { ...ticketCounts, total },
+    });
+  },
+);
+
+// Paginated, filterable list of tickets assigned to this member across the
+// org (any project) — powers the Member Detail page's ticket table.
+orgsRouter.get(
+  "/:orgId/members/:userId/tickets",
+  requireAuth,
+  requireOrgAccess,
+  requireOrgRole("SUPER_ADMIN", "ADMIN"),
+  async (req, res) => {
+    const orgId = req.params.orgId;
+    const { status, priority, type } = req.query as Record<string, string>;
+
+    const where = {
+      assigneeId: req.params.userId,
+      project: { orgId },
+      ...(status ? { status: status as any } : {}),
+      ...(priority ? { priority: priority as any } : {}),
+      ...(type ? { type: type as any } : {}),
+    };
+
+    const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
+    const pageSize = Math.min(
+      50,
+      Math.max(1, parseInt(String(req.query.pageSize ?? "10"), 10) || 10),
+    );
+
+    const [items, total] = await prisma.$transaction([
+      prisma.ticket.findMany({
+        where,
+        include: memberTicketInclude,
+        orderBy: [{ updatedAt: "desc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.ticket.count({ where }),
+    ]);
+    res.json({ items: items.map(serializeMemberTicket), total, page, pageSize });
   },
 );
 

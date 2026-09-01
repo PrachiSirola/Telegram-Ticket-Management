@@ -68,6 +68,11 @@ enum NotificationType {
   MENTIONED
 }
 
+enum TwoFactorMethod {
+  PIN
+  PASSKEY
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -89,6 +94,16 @@ model User {
   sentInvites     Invite[]             @relation("InvitedBy")
   attachments     Attachment[]
   passwordResets  PasswordResetToken[]
+   pinResets       PinResetToken[]
+    orgCreationRequests OrgCreationRequest[]
+  platformRole         PlatformRole?
+  platformAdminActive  Boolean       @default(true)
+  passwordHistory PasswordHistory[]
+    twoFactorEnabled Boolean          @default(false)
+  twoFactorMethod  TwoFactorMethod?
+  pinHash          String?
+  pinAttempts      Int              @default(0)
+  pinLockedUntil   DateTime?
   ticketStatusChanges TicketStatusHistory[] @relation("TicketStatusChanges")
 }
 
@@ -224,6 +239,55 @@ model PasswordResetToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// One-time tokens for the "forgot PIN" flow. Only issuable mid-login, right
+// after the password step has already succeeded (see POST /auth/2fa/forgot-pin) —
+// this is what stops someone without the password from resetting the PIN.
+model PinResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum PlatformRole {
+  SUPER_ADMIN
+}
+
+// A pending "create a new organisation" action, gated behind an email
+// click-to-confirm step so a hijacked session alone can't spin up an org.
+model OrgCreationRequest {
+  id            String    @id @default(cuid())
+  requestedById String
+  orgName       String
+  tokenHash     String    @unique
+  expiresAt     DateTime
+  verifiedAt    DateTime?
+  createdOrgId  String?
+  createdAt     DateTime  @default(now())
+
+  requestedBy User @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+
+  @@index([requestedById])
+}
+
+// Archive of a user's previous password hashes, used to block reuse.
+model PasswordHistory {
+  id           String   @id @default(cuid())
+  userId       String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }
 
 model Ticket {

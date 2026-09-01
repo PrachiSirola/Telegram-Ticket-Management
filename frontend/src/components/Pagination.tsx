@@ -22,7 +22,7 @@ export function Pagination({
   if (totalPages <= 1) return null;
 
   return (
-    <div className="mt-5 flex items-center justify-between">
+    <div className="mt-5 flex items-center justify-center gap-3 sm:gap-2">
       <button
         className="btn btn-secondary btn-sm"
         disabled={page <= 1}

@@ -72,7 +72,18 @@ export const isDeveloperIn = (me: Me | null, orgId: string) => roleInOrg(me, org
  * routes/orgs.ts exactly; the backend is the authoritative enforcement,
  * this is just so the UI doesn't show an option that would be rejected.
  */
-export const canCreateOrg = (me: Me | null) =>
+
+/*export const canCreateOrg = (me: Me | null) =>
   Boolean(
     me?.memberships.some((m) => m.role === "SUPER_ADMIN" || m.role === "ADMIN" || m.role === "CLIENT"),
-  );
+  );*/
+
+  /**
+ * Only the single fixed platform Super Admin may create a new organisation —
+ * an account-level flag (set manually, outside the app), completely separate
+ * from any per-org role. This mirrors the backend check in
+ * lib/access.ts isPlatformSuperAdmin exactly; the backend is the
+ * authoritative enforcement, this is just so the UI doesn't show an option
+ * that would be rejected.
+ */
+export const canCreateOrg = (me: Me | null) => Boolean(me?.isPlatformSuperAdmin);

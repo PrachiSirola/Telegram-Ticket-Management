@@ -56,7 +56,7 @@ export default function ForgotPassword() {
                   {busy ? "Sending…" : "Send reset link"}
                 </button>
               </form>
-              <p className="mt-4 text-center text-sm text-fg-soft">
+                <p className="mt-4 text-center text-sm text-fg-soft">
                 <Link to="/login" className="link">Back to sign in</Link>
               </p>
             </>

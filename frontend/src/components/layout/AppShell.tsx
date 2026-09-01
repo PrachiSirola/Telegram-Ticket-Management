@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import { ReactNode, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
@@ -38,10 +38,16 @@ type Props = {
 export function AppShell({ admin, developer, topbarLeft, topbarRight, children }: Props) {
   const { pathname } = useLocation();
   const bg = getBg(pathname);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar admin={admin} developer={developer} />
+      <Sidebar
+        admin={admin}
+        developer={developer}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+      />
 
       <div className="relative flex min-h-screen flex-1 flex-col overflow-hidden bg-bg">
         {/* Section-specific background image */}
@@ -56,9 +62,9 @@ export function AppShell({ admin, developer, topbarLeft, topbarRight, children }
           }}
         />
 
-        <Topbar left={topbarLeft} right={topbarRight} />
+        <Topbar left={topbarLeft} right={topbarRight} onMenuClick={() => setSidebarOpen(true)} />
 
-        <main className="relative z-10 mx-auto w-full max-w-[1600px] flex-1 px-8 py-8">
+        <main className="relative z-10 mx-auto w-full max-w-[1600px] flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
           {children}
         </main>
       </div>

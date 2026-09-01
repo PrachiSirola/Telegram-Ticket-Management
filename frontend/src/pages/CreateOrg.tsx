@@ -1,18 +1,18 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { canCreateOrg, useAuth } from "../auth";
 import { useOrg } from "../org";
+import { IconCheckCircle } from "../components/Icons";
 
 export default function CreateOrg() {
   const navigate = useNavigate();
-  const qc = useQueryClient();
-  const { me, refresh, logout } = useAuth();
-  const { orgs, setActiveOrg } = useOrg();
+  const { me, logout } = useAuth();
+  const { orgs } = useOrg();
   const [name, setName] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
 
   const firstOrg = orgs.length === 0;
   const qualifies = canCreateOrg(me);
@@ -22,13 +22,10 @@ export default function CreateOrg() {
     setErr(null);
     setBusy(true);
     try {
-      const org = await api.createOrg(name);
-      setActiveOrg(org.id);
-      await refresh();
-      await qc.invalidateQueries({ queryKey: ["orgs"] });
-      navigate("/");
+      await api.requestCreateOrg(name);
+      setSent(true);
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't create the organisation.");
+      setErr(e?.response?.data?.error ?? "Couldn't send the confirmation email.");
     } finally {
       setBusy(false);
     }
@@ -82,48 +79,74 @@ export default function CreateOrg() {
             WebkitBackdropFilter: 'blur(24px) saturate(180%)',
           }}
         >
-          <h1
-            className="text-2xl font-bold tracking-tight text-fg"
-            style={{ fontFamily: 'var(--font-display)' }}
-          >
-            {!qualifies
-              ? "You're not in any organisation"
-              : firstOrg
-                ? "You're not in any organisation"
-                : "New organisation"}
-          </h1>
-          <p className="mb-6 mt-2 text-sm leading-relaxed text-fg-soft">
-            {!qualifies
-              ? "Only Super Admins, Admins, or Clients can create an organisation. Ask your administrator for an invite link to join one."
-              : firstOrg
-                ? "Create one to get started — you'll be its Super Admin. Or ask an administrator for an invite link."
-                : "You'll be the new organisation's Super Admin."}
-          </p>
+          {!qualifies ? (
+            <>
+              <h1
+                className="text-2xl font-bold tracking-tight text-fg"
+                style={{ fontFamily: 'var(--font-display)' }}
+              >
+                You're not in any organisation
+              </h1>
+              <p className="mb-0 mt-2 text-sm leading-relaxed text-fg-soft">
+                Only the platform Super Admin can create a new organisation. Ask them to create
+                one and invite you, or ask your administrator for an invite link to join an
+                existing one.
+              </p>
+            </>
+          ) : sent ? (
+            <>
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-ok-bg text-ok">
+                <IconCheckCircle size={22} />
+              </div>
+              <h1
+                className="text-center text-2xl font-bold tracking-tight text-fg"
+                style={{ fontFamily: 'var(--font-display)' }}
+              >
+                Check your email
+              </h1>
+              <p className="mb-0 mt-2 text-center text-sm leading-relaxed text-fg-soft">
+                We've sent a confirmation link to <strong>{me?.email}</strong>. Open it to finish
+                creating <strong>{name.trim()}</strong>. The link expires in 30 minutes.
+              </p>
+            </>
+          ) : (
+            <>
+              <h1
+                className="text-2xl font-bold tracking-tight text-fg"
+                style={{ fontFamily: 'var(--font-display)' }}
+              >
+                {firstOrg ? "You're not in any organisation" : "New organisation"}
+              </h1>
+              <p className="mb-6 mt-2 text-sm leading-relaxed text-fg-soft">
+                {firstOrg
+                  ? "Create one to get started — you'll be its Super Admin. We'll email you a confirmation link before it's created."
+                  : "You'll be the new organisation's Super Admin. We'll email you a confirmation link before it's created."}
+              </p>
 
-          {qualifies && (
-          <form onSubmit={submit} className="grid gap-5">
-            <div>
-              <label className="mb-1.5 block text-sm font-medium text-fg-soft">
-                Organisation name
-              </label>
-              <input
-                className="input"
-                type="text"
-                placeholder="Acme Inc."
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                maxLength={100}
-                autoFocus
-              />
-            </div>
-            <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
-              {busy ? "Creating…" : "Create organisation"}
-            </button>
-          </form>
+              <form onSubmit={submit} className="grid gap-5">
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-fg-soft">
+                    Organisation name
+                  </label>
+                  <input
+                    className="input"
+                    type="text"
+                    placeholder="Acme Inc."
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    required
+                    maxLength={100}
+                    autoFocus
+                  />
+                </div>
+                <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
+                  {busy ? "Sending…" : "Send confirmation email"}
+                </button>
+              </form>
+
+              {err && <p className="mt-3 text-sm text-danger">{err}</p>}
+            </>
           )}
-
-          {err && <p className="mt-3 text-sm text-danger">{err}</p>}
         </div>
 
         <p className="mt-6 text-center text-sm font-medium text-fg-soft">
@@ -142,7 +165,7 @@ export default function CreateOrg() {
               className="font-semibold text-primary underline underline-offset-2 hover:text-primary-hover"
               onClick={() => navigate(-1)}
             >
-              Cancel
+              {sent ? "Back" : "Cancel"}
             </button>
           )}
         </p>

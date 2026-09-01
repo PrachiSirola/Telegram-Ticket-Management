@@ -32,6 +32,9 @@ export const env = {
   },
 
   // Attachments (local disk for now; swap to S3/R2 for production PaaS).
+  sessionCookieName: process.env.SESSION_COOKIE_NAME ?? "tm_session",
+  twoFactorCookieName: process.env.TWO_FACTOR_COOKIE_NAME ?? "tm_2fa_pending",
   uploadDir: process.env.UPLOAD_DIR ?? "uploads",
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB ?? 10),
+  
 };

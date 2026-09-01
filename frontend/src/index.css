@@ -186,8 +186,6 @@
   }
   .link:hover {
     color: var(--primary-hover);
-    text-decoration: underline;
-    text-underline-offset: 3px;
   }
   .link-danger {
     color: var(--danger);

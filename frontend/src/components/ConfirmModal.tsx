@@ -6,6 +6,8 @@ export function ConfirmModal({
   title,
   message,
   confirmLabel = "Delete",
+  pendingLabel,
+  variant = "danger",
   pending = false,
   onConfirm,
   onClose,
@@ -14,10 +16,18 @@ export function ConfirmModal({
   title: string;
   message: ReactNode;
   confirmLabel?: string;
+  /** Text shown on the confirm button while pending. Defaults to
+   * "Deleting…" for the danger variant (unchanged behaviour for existing
+   * delete-confirmation call sites) and to `${confirmLabel}…` otherwise. */
+  pendingLabel?: string;
+  /** "danger" (default, red button — for destructive actions like delete)
+   * or "primary" (for non-destructive confirmations like closing a ticket). */
+  variant?: "danger" | "primary";
   pending?: boolean;
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const resolvedPendingLabel = pendingLabel ?? (variant === "danger" ? "Deleting…" : `${confirmLabel}…`);
   return (
     <Modal open={open} onClose={onClose} title={title}>
       <div className="text-sm text-fg-soft">{message}</div>
@@ -25,8 +35,12 @@ export function ConfirmModal({
         <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={pending}>
           Cancel
         </button>
-        <button className="btn btn-danger btn-sm" onClick={onConfirm} disabled={pending}>
-          {pending ? "Deleting…" : confirmLabel}
+        <button
+          className={`btn btn-sm ${variant === "danger" ? "btn-danger" : "btn-primary"}`}
+          onClick={onConfirm}
+          disabled={pending}
+        >
+          {pending ? resolvedPendingLabel : confirmLabel}
         </button>
       </div>
     </Modal>

@@ -6,7 +6,7 @@ import { useOrg } from "../org";
 import { Avatar } from "./ui";
 import { Dropdown } from "./Dropdown";
 import { NotificationsBell } from "./NotificationsBell";
-import { AppShell } from "./layout";
+import { AppShell } from "./layout/AppShell";
 import { IconLogOut, IconAlertTriangle } from "./Icons";
 import { Modal } from "./Modal";
 import { useState, type ReactNode } from "react";
@@ -36,7 +36,7 @@ export function Layout({ children }: { children: ReactNode }) {
       admin={admin}
       developer={developer}
       topbarLeft={
-        <div className="flex items-center gap-4">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3 lg:gap-4">
 
           <div className="hidden xl:flex flex-col leading-tight">
             <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted">
@@ -47,37 +47,41 @@ export function Layout({ children }: { children: ReactNode }) {
             </span>
           </div>
 
-          <Dropdown
-            className="w-52"
-            size="sm"
-            placeholder="Organisation"
-            value={activeOrgId}
-            onChange={(id) => {
-              if (id === "__create__") {
-                navigate("/create-org");
-                return;
-              }
-              setActiveOrg(id);
-              navigate("/");
-            }}
-            options={[
-              ...orgs.map((o) => ({
-                value: o.id,
-                label: o.name,
-              })),
-              ...(canCreateOrg(me)
-                ? [
-                    {
-                      value: "__create__",
-                      label: "+ New organisation",
-                    },
-                  ]
-                : []),
-            ]}
-          />
+         <Dropdown
+          className="w-28 sm:w-40 md:w-48 lg:w-52"
+          size="sm"
+          placeholder="Organisation"
+          value={activeOrgId}
+          onChange={(id) => {
+            if (id === "__create__") {
+              navigate("/create-org");
+              return;
+            }
+            setActiveOrg(id);
+            navigate("/");
+          }}
+          options={[
+            ...orgs.map((o) => ({
+              value: o.id,
+              label: o.name,
+            })),
+            ...(canCreateOrg(me)
+              ? [
+                  {
+                    value: "__create__",
+                    label: "+ New organisation",
+                  },
+                ]
+              : []),
+          ]}
+        />
 
+        {/* Project switcher — hidden on phones; on mobile the Dashboard's
+            project grid and the sidebar nav already cover navigation, so
+            this is the first thing to drop when the topbar is short on room. */}
+        <div className="hidden md:block">
           <Dropdown
-            className="w-52"
+            className="w-40 lg:w-52"
             size="sm"
             placeholder="Project"
             value={currentProject}
@@ -90,16 +94,20 @@ export function Layout({ children }: { children: ReactNode }) {
             }))}
           />
         </div>
+        </div>
       }
       topbarRight={
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
 
           <NotificationsBell />
 
+          {/* Avatar/name card — hidden on phones; Profile is already reachable
+              from the sidebar footer, so this is a nice-to-have shortcut on
+              larger screens rather than something worth the topbar space here. */}
           {me && (
             <Link
               to="/profile"
-              className="flex items-center gap-3 rounded-xl border border-card-border bg-white px-3 py-2 transition-all duration-200 hover:border-primary/30 hover:shadow-sm"
+              className="hidden items-center gap-2 rounded-xl border border-card-border bg-white px-2 py-1.5 transition-all duration-200 hover:border-primary/30 hover:shadow-sm sm:flex sm:gap-3 sm:px-3 sm:py-2"
             >
               <Avatar
                 name={me.name}
@@ -120,14 +128,21 @@ export function Layout({ children }: { children: ReactNode }) {
             </Link>
           )}
 
-          <button
-            onClick={() => setShowLogout(true)}
-            className="btn btn-secondary btn-sm"
-            title="Log out"
-          >
-            <IconLogOut size={16} />
-            <span className="hidden sm:inline">Logout</span>
-          </button>
+          
+            <button
+              onClick={() => setShowLogout(true)}
+              className="btn btn-secondary btn-sm"
+              title="Log out"
+            >
+              <IconLogOut size={16} />
+              <span className="hidden sm:inline">Logout</span>
+            </button>
+            {/* Hover tooltip — only relevant on phones where the button is
+                icon-only; at sm+ the label is already shown inline so this
+                stays hidden there to avoid a redundant double-label. */}
+            <span className="pointer-events-none absolute right-0 top-full z-50 mt-2 whitespace-nowrap rounded-lg bg-fg px-2.5 py-1.5 text-xs font-medium text-white opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 sm:hidden">
+              Logout
+            </span>
         </div>
       }
     >

@@ -4,7 +4,8 @@ import type { Invite, Prisma, User } from "@prisma/client";
 import { prisma } from "../prisma.js";
 import { env } from "../env.js";
 import { signSession } from "./jwt.js";
-import { hashPassword, verifyPassword } from "./password.js";
+import { hashPassword, verifyPassword, passwordContainsIdentityError, PasswordPolicyError } from "./password.js";
+import { assertPasswordNotReused, recordPasswordHistory } from "./passwordHistory.js";
 
 // When the frontend and API are served from different origins (e.g. two
 // Render services), the browser only sends the session cookie on cross-site
@@ -157,8 +158,11 @@ export async function registerFromInvite(input: {
 }): Promise<User> {
   const invite = await loadUsableInvite(input.token);
   if (!invite) throw new InvalidInviteError();
-  const email = invite.email.toLowerCase();
+    const email = invite.email.toLowerCase();
   if (await prisma.user.findUnique({ where: { email } })) throw new AccountExistsError();
+
+  const identityErr = passwordContainsIdentityError(input.password, email, input.name);
+  if (identityErr) throw new PasswordPolicyError(identityErr);
 
   const passwordHash = await hashPassword(input.password);
   return prisma.$transaction(async (tx) => {
@@ -224,6 +228,13 @@ export async function resetPasswordWithToken(token: string, newPassword: string)
   if (!record || record.usedAt || record.expiresAt < new Date()) {
     throw new Error("This reset link is invalid or has expired.");
   }
+
+  const existingUser = await prisma.user.findUniqueOrThrow({ where: { id: record.userId } });
+
+  const identityErr = passwordContainsIdentityError(newPassword, existingUser.email, existingUser.name);
+  if (identityErr) throw new PasswordPolicyError(identityErr);
+  await assertPasswordNotReused(existingUser.id, existingUser.passwordHash, newPassword);
+
   const passwordHash = await hashPassword(newPassword);
   const [user] = await prisma.$transaction([
     prisma.user.update({ where: { id: record.userId }, data: { passwordHash } }),
@@ -234,5 +245,6 @@ export async function resetPasswordWithToken(token: string, newPassword: string)
       data: { usedAt: new Date() },
     }),
   ]);
+  await recordPasswordHistory(existingUser.id, existingUser.passwordHash);
   return user;
 }

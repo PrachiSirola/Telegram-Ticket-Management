@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { isAdminOrAboveIn, isInternalIn, useAuth } from "../auth";
+import { isAdminOrAboveIn, isDeveloperIn, isInternalIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { Avatar, PriorityBadge, StatusBadge, TypeBadge } from "../components/ui";
 import { Attachments } from "../components/Attachments";
@@ -13,8 +13,9 @@ import {
   extractMentionIds,
   type MentionMember,
 } from "../components/MentionTextarea";
-import { IconUpload, IconTrash } from "../components/Icons";
+import { IconUpload, IconTrash, IconCheckCircle } from "../components/Icons";
 import type { Comment, CommentAttachment, CommentVisibility } from "../types";
+import { todayStr } from "../lib/dateUtils";
 
 export default function TicketDetail() {
   const { id = "" } = useParams();
@@ -23,6 +24,7 @@ export default function TicketDetail() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingClose, setConfirmingClose] = useState(false);
 
   const { data: ticket, isLoading } = useQuery({
     queryKey: ["ticket", id],
@@ -68,7 +70,9 @@ export default function TicketDetail() {
   const orgId = ticket.orgId ?? "";
   const internal = isInternalIn(me, orgId);
   const admin = isAdminOrAboveIn(me, orgId);
-  const canDeleteTicket = admin || ticket.reporter?.id === me?.id;
+  // Developers never get delete access, even for tickets they reported —
+  // only SA/Admin, or a reporting CLIENT deleting their own ticket.
+  const canDeleteTicket = admin || (!isDeveloperIn(me, orgId) && ticket.reporter?.id === me?.id);
   const assignable = (members ?? []).filter((m) => m.role !== "CLIENT");
   const mentionables: MentionMember[] = (members ?? []).map((m) => ({
     id: m.userId,
@@ -185,20 +189,31 @@ export default function TicketDetail() {
               </Field>
               <Field label="Due date">
                 <input
-                  type="date"
-                  className="input"
-                  value={ticket.dueDate ? ticket.dueDate.slice(0, 10) : ""}
-                  onChange={(e) =>
-                    update.mutate({
-                      dueDate: e.target.value ? new Date(e.target.value).toISOString() : null,
-                    })
-                  }
-                />
+                type="date"
+                className="input"
+                value={ticket.dueDate ? ticket.dueDate.slice(0, 10) : ""}
+                min={todayStr()}
+                onChange={(e) =>
+                  update.mutate({
+                    dueDate: e.target.value ? new Date(e.target.value).toISOString() : null,
+                  })
+                }
+              />
               </Field>
             </>
           )}
         </div>
 
+        {internal && (
+        <button
+          onClick={() => setConfirmingClose(true)}
+          disabled={ticket.status === "DONE" || update.isPending}
+          className="btn btn-secondary btn-sm btn-block"
+        >
+          <IconCheckCircle size={14} />
+          {ticket.status === "DONE" ? "Closed" : update.isPending ? "Closing…" : "Close ticket"}
+        </button>
+      )}
         {canDeleteTicket && (
           <button
             onClick={() => setConfirmingDelete(true)}
@@ -223,6 +238,26 @@ export default function TicketDetail() {
         onConfirm={() => deleteTicket.mutate()}
         onClose={() => setConfirmingDelete(false)}
       />
+
+      <ConfirmModal
+      open={confirmingClose}
+      title="Close ticket?"
+      message={
+        <>
+          This will mark <span className="font-medium">"{ticket.title}"</span> as Done.
+        </>
+      }
+      confirmLabel="Close ticket"
+      variant="primary"
+      pending={update.isPending}
+      onConfirm={() =>
+        update.mutate(
+          { status: "DONE" },
+          { onSuccess: () => setConfirmingClose(false) },
+        )
+      }
+      onClose={() => setConfirmingClose(false)}
+    />
     </div>
   );
 }

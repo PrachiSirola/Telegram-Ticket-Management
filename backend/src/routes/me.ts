@@ -3,7 +3,14 @@ import { z } from "zod";
 import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { canAccessOrg, isClient, membershipIn, orgRole } from "../lib/access.js";
-import { hashPassword, MIN_PASSWORD_LENGTH, verifyPassword } from "../lib/password.js";
+import {
+  hashPassword,
+  passwordContainsIdentityError,
+  passwordStrengthError,
+  PasswordPolicyError,
+  verifyPassword,
+} from "../lib/password.js";
+import { assertPasswordNotReused, recordPasswordHistory } from "../lib/passwordHistory.js";
 import { passwordChangedEmail, sendEmail } from "../lib/email.js";
 import { developerVisibleProjectsWhere } from "../lib/projectAccess.js";
 import { resolveWorkRange, type WorkRange } from "../lib/dateRanges.js";
@@ -13,6 +20,7 @@ import {
   serializeTicket,
   workTicketInclude,
 } from "../lib/myWork.js";
+import { setPin, pinFormatError } from "../lib/twoFactor.js";
 
 export const meRouter = Router();
 
@@ -35,8 +43,9 @@ meRouter.patch("/profile", requireAuth, async (req, res) => {
 
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1),
-  newPassword: z.string().min(MIN_PASSWORD_LENGTH, {
-    message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
+  newPassword: z.string().superRefine((password, ctx) => {
+    const err = passwordStrengthError(password);
+    if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, message: err });
   }),
 });
 
@@ -50,10 +59,21 @@ meRouter.post("/change-password", requireAuth, async (req, res) => {
   const ok = await verifyPassword(parsed.data.currentPassword, current.passwordHash);
   if (!ok) return res.status(400).json({ error: "Current password is incorrect." });
 
+  const identityErr = passwordContainsIdentityError(parsed.data.newPassword, current.email, current.name);
+  if (identityErr) return res.status(400).json({ error: identityErr });
+
+  try {
+    await assertPasswordNotReused(current.id, current.passwordHash, parsed.data.newPassword);
+  } catch (err) {
+    if (err instanceof PasswordPolicyError) return res.status(400).json({ error: err.message });
+    throw err;
+  }
+
   await prisma.user.update({
     where: { id: current.id },
     data: { passwordHash: await hashPassword(parsed.data.newPassword) },
   });
+  await recordPasswordHistory(current.id, current.passwordHash);
   // Send confirmation email (fire-and-forget)
   const mail = passwordChangedEmail(current.name);
   sendEmail({ ...mail, to: current.email });
@@ -291,4 +311,73 @@ meRouter.post("/notifications/read-all", requireAuth, async (req, res) => {
     data: { isRead: true },
   });
   res.json({ ok: true });
+});
+
+
+meRouter.get("/2fa", requireAuth, async (req, res) => {
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { id: req.user!.id },
+    select: { twoFactorEnabled: true, twoFactorMethod: true, pinHash: true },
+  });
+  res.json({
+    twoFactorEnabled: user.twoFactorEnabled,
+    twoFactorMethod: user.twoFactorMethod,
+    hasPin: Boolean(user.pinHash),
+  });
+});
+
+const setPinSchema = z.object({
+  currentPassword: z.string().min(1),
+  pin: z.string().min(1),
+  confirmPin: z.string().min(1),
+});
+
+meRouter.post("/2fa/pin", requireAuth, async (req, res) => {
+  const parsed = setPinSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
+  const { currentPassword, pin, confirmPin } = parsed.data;
+
+  if (pin !== confirmPin) return res.status(400).json({ error: "PINs don't match." });
+  const formatErr = pinFormatError(pin);
+  if (formatErr) return res.status(400).json({ error: formatErr });
+
+  const current = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+  const ok = await verifyPassword(currentPassword, current.passwordHash);
+  if (!ok) return res.status(400).json({ error: "Current password is incorrect." });
+
+  // Same identity check used for the account password — no reusing your name/email as a PIN fragment.
+  const identityErr = passwordContainsIdentityError(pin, current.email, current.name);
+  if (identityErr) return res.status(400).json({ error: "PIN can't contain your name or email." });
+
+  await setPin(current.id, pin);
+  res.json({ ok: true });
+});
+
+const toggleSchema = z.object({
+  enabled: z.boolean(),
+  method: z.enum(["PIN", "PASSKEY"]).optional(),
+});
+
+meRouter.post("/2fa/toggle", requireAuth, async (req, res) => {
+  const parsed = toggleSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
+  const { enabled, method } = parsed.data;
+
+  if (enabled) {
+    if (method === "PIN") {
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+      if (!user.pinHash) return res.status(400).json({ error: "Set a PIN before enabling it." });
+    } else if (method === "PASSKEY") {
+      return res.status(400).json({ error: "Passkey 2FA isn't available yet." });
+    } else {
+      return res.status(400).json({ error: "Choose a 2FA method." });
+    }
+  }
+
+  const user = await prisma.user.update({
+    where: { id: req.user!.id },
+    data: { twoFactorEnabled: enabled, twoFactorMethod: enabled ? method : null },
+    select: { twoFactorEnabled: true, twoFactorMethod: true },
+  });
+  res.json(user);
 });

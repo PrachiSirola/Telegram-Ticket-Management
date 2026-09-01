@@ -7,6 +7,7 @@ export type CommentVisibility = "INTERNAL" | "CLIENT_VISIBLE";
 
 export type WorkRange = "current" | "today" | "week" | "prev_week" | "month" | "prev_month" | "custom";
 export type WorkStatusFilter = "all" | "pending" | "in_progress" | "completed" | "overdue";
+export type ProjectStatusFilter = "new" | "active" | "closed" | undefined;
 
 /** Envelope shape for opt-in server-side pagination (projects, org members). */
 export interface Paged<T> {
@@ -16,12 +17,22 @@ export interface Paged<T> {
   pageSize: number;
 }
 
+export interface ProjectCounts {
+  all: number;
+  new: number;
+  active: number;
+  closed: number;
+}
+
 export interface Me {
   id: string;
   email: string;
   name: string;
   avatarUrl: string | null;
+  isPlatformSuperAdmin: boolean;
   memberships: { orgId: string; orgName: string; role: OrgRole }[];
+  twoFactorEnabled: boolean;
+  twoFactorMethod: "PIN" | "PASSKEY" | null;
 }
 
 export interface Organization {
@@ -84,6 +95,7 @@ export interface UserLite {
 }
 
 export interface Member extends UserLite {
+  membershipId: string;
   userId: string;
   role: OrgRole;
 }

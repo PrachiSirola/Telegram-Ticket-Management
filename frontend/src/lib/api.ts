@@ -14,6 +14,8 @@ import type {
   OrgSettings,
   Paged,
   Project,
+  ProjectCounts,
+  ProjectStatusFilter,
   Ticket,
   TicketPriority,
   TicketStatus,
@@ -68,8 +70,10 @@ export const api = {
 
   // --- Organisations ---
   orgs: () => http.get<Organization[]>("/orgs").then((r) => r.data),
-  createOrg: (name: string) =>
-    http.post<Organization>("/orgs", { name }).then((r) => r.data),
+    requestCreateOrg: (name: string) =>
+    http.post<{ ok: true }>("/orgs/create/request", { name }).then((r) => r.data),
+  verifyCreateOrg: (token: string) =>
+    http.post<Organization>("/orgs/create/verify", { token }).then((r) => r.data),
   orgSettings: (orgId: string) =>
     http.get<OrgSettings>(`/orgs/${orgId}/settings`).then((r) => r.data),
   updateOrg: (
@@ -86,9 +90,11 @@ export const api = {
   // Opt-in pagination, same convention as projectsPaged above. Used by the
   // Members page's list; OrgSettings' ownership-transfer picker keeps using
   // orgMembers() for the complete list.
-  orgMembersPaged: (orgId: string, params: { page: number; pageSize: number }) =>
+  orgMembersPaged: (orgId: string, params: { page: number; pageSize: number; q?: string }) =>
     http
-      .get<Paged<OrgMember>>(`/orgs/${orgId}/members`, { params })
+      .get<Paged<OrgMember>>(`/orgs/${orgId}/members`, {
+        params: { page: params.page, pageSize: params.pageSize, q: params.q || undefined },
+      })
       .then((r) => r.data),
   updateMember: (
     orgId: string,
@@ -97,6 +103,15 @@ export const api = {
   ) => http.patch(`/orgs/${orgId}/members/${userId}`, data).then((r) => r.data),
   removeMember: (orgId: string, userId: string) =>
     http.delete(`/orgs/${orgId}/members/${userId}`).then((r) => r.data),
+  // Member Detail page: profile + project access + assigned-ticket breakdown.
+  memberDetail: (orgId: string, userId: string) =>
+    http.get(`/orgs/${orgId}/members/${userId}/detail`).then((r) => r.data),
+  memberTickets: (
+    orgId: string,
+    userId: string,
+    params: { status?: string; priority?: string; type?: string; page: number; pageSize: number },
+  ) =>
+    http.get(`/orgs/${orgId}/members/${userId}/tickets`, { params }).then((r) => r.data),
 
   // --- Invites ---
   invites: (orgId: string) =>
@@ -115,10 +130,19 @@ export const api = {
   // { items, total, page, pageSize } envelope instead of the plain array.
   // Used by the Dashboard's paginated project grid; every other caller keeps
   // using `projects()` above and is unaffected.
-  projectsPaged: (orgId: string, params: { page: number; pageSize: number }) =>
+  projectsPaged: (
+    orgId: string,
+    params: { page: number; pageSize: number; status?: ProjectStatusFilter; q?: string },
+  ) =>
     http
-      .get<Paged<Project>>(`/orgs/${orgId}/projects`, { params })
+      .get<Paged<Project>>(`/orgs/${orgId}/projects`, {
+        params: { page: params.page, pageSize: params.pageSize, status: params.status, q: params.q || undefined },
+      })
       .then((r) => r.data),
+  // Live counts for the All/Active/Closed tab bar — derived from ticket
+  // state server-side, not stored, so they're always accurate.
+  projectCounts: (orgId: string) =>
+    http.get<ProjectCounts>(`/orgs/${orgId}/projects/counts`).then((r) => r.data),
   createProject: (orgId: string, data: { name: string; description?: string }) =>
     http.post<Project>(`/orgs/${orgId}/projects`, data).then((r) => r.data),
   updateProject: (orgId: string, projectId: string, data: { name?: string; description?: string }) =>
@@ -133,6 +157,19 @@ export const api = {
     http
       .put(`/orgs/${orgId}/projects/${projectId}/developers`, { membershipIds })
       .then((r) => r.data),
+
+  // --- 2FA ---
+  twoFactorStatus: () =>
+    http.get<{ twoFactorEnabled: boolean; twoFactorMethod: "PIN" | "PASSKEY" | null; hasPin: boolean }>("/me/2fa").then((r) => r.data),
+  setPin: (data: { currentPassword: string; pin: string; confirmPin: string }) =>
+    http.post("/me/2fa/pin", data).then((r) => r.data),
+  toggle2fa: (data: { enabled: boolean; method?: "PIN" | "PASSKEY" }) =>
+    http.post("/me/2fa/toggle", data).then((r) => r.data),
+  verify2fa: (pin: string) => http.post("/auth/2fa/verify", { pin }).then((r) => r.data),
+
+  forgotPin: () => http.post("/auth/2fa/forgot-pin").then((r) => r.data),
+  resetPin: (data: { token: string; pin: string; confirmPin: string }) =>
+    http.post("/auth/2fa/reset-pin", data).then((r) => r.data),
 
   // --- Tickets ---
   tickets: (orgId: string, projectId: string, params?: Record<string, string>) =>

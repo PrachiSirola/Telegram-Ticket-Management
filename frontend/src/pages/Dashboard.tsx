@@ -7,8 +7,10 @@ import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Pagination } from "../components/Pagination";
-import { IconFolder, IconPlus, IconArrowRight, IconTrash } from "../components/Icons";
-import type { Project } from "../types";
+import { IconFolder, IconPlus, IconArrowRight, IconTrash, IconSearch } from "../components/Icons";
+import type { Project, ProjectCounts, ProjectStatusFilter } from "../types";
+import { Dropdown } from "../components/Dropdown";
+
 
 /* ── Workspace illustration (warm outline art) ── */
 function HeroIllustration() {
@@ -194,7 +196,15 @@ const PROJECT_COLORS = [
   { bg: "#f0ece8", icon: "#7a5030", border: "#d8cec2" },
 ];
 
-const PROJECTS_PAGE_SIZE = 18; // 3 columns × 6 rows
+const PROJECTS_PAGE_SIZE_OPTIONS = [9, 18, 30, 60, 100];
+const DEFAULT_PROJECTS_PAGE_SIZE = 18; // 3 columns × 6 rows
+
+const PROJECT_TABS: { key: ProjectStatusFilter; label: string; countKey: keyof ProjectCounts }[] = [
+  { key: undefined, label: "All", countKey: "all" },
+  { key: "new", label: "New", countKey: "new" },
+  { key: "active", label: "Active", countKey: "active" },
+  { key: "closed", label: "Closed", countKey: "closed" },
+];
 
 function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boolean }) {
   const qc = useQueryClient();
@@ -203,13 +213,40 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
   const [description, setDescription] = useState("");
   const [delProject, setDelProject] = useState<Project | null>(null);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PROJECTS_PAGE_SIZE);
+  const [tab, setTab] = useState<ProjectStatusFilter>(undefined); // undefined = "All"
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  // Debounce the search box so we're not firing a request on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Any change to what's being filtered/searched/sized always lands back on page 1.
+  useEffect(() => {
+    setPage(1);
+  }, [tab, pageSize, debouncedSearch]);
+
+  // Live tab counts (Active/Closed are computed server-side from ticket
+  // state, not stored — see backend/src/routes/projects.ts statusWhere()).
+  const { data: counts } = useQuery({
+    queryKey: ["projects", orgId, "counts"],
+    queryFn: () => api.projectCounts(orgId),
+    enabled: !!orgId,
+  });
 
   const { data: paged, isLoading } = useQuery({
-    queryKey: ["projects", orgId, "paged", page],
-    queryFn: () => api.projectsPaged(orgId, { page, pageSize: PROJECTS_PAGE_SIZE }),
+    queryKey: ["projects", orgId, "paged", tab, page, pageSize, debouncedSearch],
+    queryFn: () => api.projectsPaged(orgId, { page, pageSize, status: tab, q: debouncedSearch }),
     enabled: !!orgId,
   });
   const projects = paged?.items;
+
+  function selectTab(next: ProjectStatusFilter) {
+    setTab(next);
+  }
 
   const create = useMutation({
     mutationFn: () => api.createProject(orgId, { name, description: description || undefined }),
@@ -217,7 +254,11 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
       setName("");
       setDescription("");
       setShowForm(false);
-      setPage(1); // a newly created project sorts alphabetically — safest to land back on page 1
+      // A fresh project has zero tickets, so it can't match Active/Closed —
+      // jump back to All so it doesn't look like it disappeared. Also clear
+      // any active search so the new project is guaranteed to be visible.
+      setTab(undefined);
+      setSearch("");
       qc.invalidateQueries({ queryKey: ["projects", orgId] });
     },
   });
@@ -237,14 +278,47 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
 
   return (
     <section>
-      <div className="mb-5 flex items-center justify-between">
-        <h2 className="text-lg font-bold tracking-tight text-fg" style={{ fontFamily: "var(--font-display)" }}>Active Projects</h2>
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-lg font-bold tracking-tight text-fg" style={{ fontFamily: "var(--font-display)" }}>Projects</h2>
         {canManage && (
           <button onClick={() => setShowForm((s) => !s)} className="btn btn-primary btn-sm">
             <IconPlus size={15} />{showForm ? "Cancel" : "New Project"}
           </button>
         )}
       </div>
+
+      {/* Status tabs (left) + search (right), same row */}
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div className="inline-flex items-center gap-1 rounded-full border border-card-border bg-white p-1">
+          {PROJECT_TABS.map((t) => {
+            const active = t.key === tab;
+            const count = counts?.[t.countKey];
+            return (
+              <button
+                key={t.label}
+                onClick={() => selectTab(t.key)}
+                className={`rounded-full px-3.5 py-1.5 text-sm font-semibold transition-colors ${
+                  active ? "bg-[#5C4033] text-white" : "text-fg-soft hover:bg-[#8B6F4E]/15 hover:text-fg"
+                }`}
+              >
+                {t.label}
+                {count !== undefined && <span className="ml-1.5 opacity-70">{count}</span>}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="relative" style={{ minWidth: 240 }}>
+          <IconSearch size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+          <input
+            className="input pl-9"
+            placeholder="Search projects…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+      </div>
+
       {showForm && (
         <div className="card mb-5 flex flex-wrap items-end gap-3 p-5">
           <div className="flex-1" style={{ minWidth: 160 }}>
@@ -260,11 +334,18 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
           </button>
         </div>
       )}
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {!isLoading && projects?.length === 0 && (
           <div className="card px-8 py-12 text-center sm:col-span-2 lg:col-span-3">
             <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-accent text-primary"><IconFolder size={20} /></div>
-            <p className="text-sm font-medium text-fg-soft">No projects yet{canManage ? " — create one to get started." : "."}</p>
+            <p className="text-sm font-medium text-fg-soft">
+              {debouncedSearch
+                ? `No projects match "${debouncedSearch}".`
+                : tab === undefined
+                  ? `No projects yet${canManage ? " — create one to get started." : "."}`
+                  : `No ${tab} projects right now.`}
+            </p>
           </div>
         )}
         {projects?.map((p, i) => {
@@ -292,14 +373,26 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
           );
         })}
       </div>
-      {paged && (
-        <Pagination
-          page={paged.page}
-          total={paged.total}
-          pageSize={paged.pageSize}
-          onPageChange={setPage}
-        />
+
+      {paged && paged.total > 0 && (
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-sm text-fg-soft">
+            <span>Rows per page</span>
+            <Dropdown
+              className="w-20"
+              size="sm"
+              value={String(pageSize)}
+              onChange={(v) => setPageSize(Number(v))}
+              options={PROJECTS_PAGE_SIZE_OPTIONS.map((n) => ({ value: String(n), label: String(n) }))}
+            />
+            <span>
+              {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, paged.total)} of {paged.total} projects
+            </span>
+          </div>
+          <Pagination page={paged.page} total={paged.total} pageSize={paged.pageSize} onPageChange={setPage} />
+        </div>
       )}
+
       <ConfirmModal open={!!delProject} title="Delete project?" message={<>This permanently deletes <span className="font-medium">"{delProject?.name}"</span> and all of its tickets, comments, and attachments.</>} pending={del.isPending} onConfirm={() => del.mutate(delProject!.id)} onClose={() => setDelProject(null)} />
     </section>
   );

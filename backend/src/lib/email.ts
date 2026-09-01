@@ -271,6 +271,20 @@ export function passwordResetEmail(name: string, resetUrl: string): SendEmailOpt
   return { to: "", subject: "Reset your Tickets password", html, text };
 }
 
+export function pinResetEmail(name: string, resetUrl: string): SendEmailOpts {
+  const text = `Hi ${name},\n\nWe received a request to reset your Tickets 2FA PIN. Use the link below to set a new one. This link expires in 1 hour.\n\n${resetUrl}\n\nIf you didn't request this, you can safely ignore this email — your PIN won't change.`;
+
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">Reset your 2FA PIN</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:${TEXT_MID};line-height:1.6;">Hi <strong>${name}</strong>, we received a request to reset your Tickets two-factor PIN. Click below to choose a new one.</p>
+    ${ctaButton("Choose a new PIN", resetUrl)}
+    <p style="margin:24px 0 0;font-size:13px;color:${TEXT_MUTED};text-align:center;">This link expires in <strong>1 hour</strong>. If you didn't request it, ignore this email — your PIN won't change.</p>
+    <p style="margin:12px 0 0;font-size:11px;color:${TEXT_MUTED};text-align:center;word-break:break-all;">${resetUrl}</p>
+  `);
+
+  return { to: "", subject: "Reset your Tickets 2FA PIN", html, text };
+}
+
 export function passwordChangedEmail(name: string): SendEmailOpts {
   const text = `Hi ${name},\n\nYour Tickets password was just changed. If this was you, no action is needed.\n\nIf you didn't make this change, please reset your password immediately or contact support.`;
 
@@ -315,4 +329,18 @@ export function welcomeEmail(name: string, loginUrl: string): SendEmailOpts {
   `);
 
   return { to: "", subject: "Welcome to Tickets!", html, text };
+}
+
+export function orgCreationVerifyEmail(name: string, orgName: string, verifyUrl: string): SendEmailOpts {
+  const text = `Hi ${name},\n\nSomeone (hopefully you) requested to create a new organisation called "${orgName}" on Tickets. If this was you, click the link below to confirm and finish creating it. This link expires in 30 minutes.\n\n${verifyUrl}\n\nIf you didn't request this, ignore this email — no organisation will be created.`;
+
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">Confirm it's you</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:${TEXT_MID};line-height:1.6;">Hi <strong>${name}</strong>, someone requested to create a new organisation called <strong>${orgName}</strong>. Click below to confirm and finish creating it.</p>
+    ${ctaButton("Confirm & create organisation", verifyUrl)}
+    <p style="margin:24px 0 0;font-size:13px;color:${TEXT_MUTED};text-align:center;">This link expires in <strong>30 minutes</strong>. If you didn't request this, ignore this email — nothing will be created.</p>
+    <p style="margin:12px 0 0;font-size:11px;color:${TEXT_MUTED};text-align:center;word-break:break-all;">${verifyUrl}</p>
+  `);
+
+  return { to: "", subject: `Confirm: create "${orgName}" on Tickets`, html, text };
 }

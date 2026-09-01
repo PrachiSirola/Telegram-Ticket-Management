@@ -6,6 +6,7 @@ import { env } from "../env.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireOrgRole } from "../middleware/org.js";
 import { isOrgSA } from "../lib/access.js";
+import { isAllowedEmailDomain } from "../lib/password.js";
 import { inviteEmail, sendEmail } from "../lib/email.js";
 import type { Invite } from "@prisma/client";
 
@@ -55,6 +56,10 @@ invitesRouter.post(
     const orgId = req.params.orgId;
     const email = parsed.data.email.toLowerCase();
     const { role } = parsed.data;
+
+    if (!isAllowedEmailDomain(email)) {
+      return res.status(400).json({ error: "Please enter a valid email address." });
+    }
 
     if (role === "ADMIN" && !isOrgSA(req.user!, orgId)) {
       return res.status(403).json({ error: "Only the Super Admin can invite Admins" });
