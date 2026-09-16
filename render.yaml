@@ -53,8 +53,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: FRONTEND_URL
-        sync: false
-        sync: false # signup OTPs + password resets; console fallback if unset
+        sync: false # set to this app's real deployed frontend URL, e.g. https://ticket-mgmt-web.onrender.com — invite/reset/notification links are built from this
       - key: EMAIL_FROM
         sync: false
 
