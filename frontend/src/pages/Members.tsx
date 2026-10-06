@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -6,8 +6,15 @@ import { isAdminOrAboveIn, isOrgSA, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Dropdown, MultiDropdown } from "../components/Dropdown";
+import { Pagination } from "../components/Pagination";
 import { Avatar } from "../components/ui";
+import { IconPlus, IconSearch } from "../components/Icons";
+import { isAllowedEmailDomain } from "../lib/emailDomains";
 import type { OrgMember } from "../types";
+import { EmailDomainInput } from "../components/EmailDomainInput";
+import { Link } from "react-router-dom";
+
+const MEMBERS_PAGE_SIZE = 10;
 
 export default function Members() {
   const { me } = useAuth();
@@ -17,11 +24,28 @@ export default function Members() {
   const sa = isOrgSA(me, activeOrgId);
   const admin = isAdminOrAboveIn(me, activeOrgId);
 
-  const { data: members } = useQuery({
-    queryKey: ["orgMembers", activeOrgId],
-    queryFn: () => api.orgMembers(activeOrgId),
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  // Debounce the search box so we're not firing a request on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // A new search always lands back on page 1.
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
+
+  const { data: paged } = useQuery({
+    queryKey: ["orgMembers", activeOrgId, "paged", page, debouncedSearch],
+    queryFn: () =>
+      api.orgMembersPaged(activeOrgId, { page, pageSize: MEMBERS_PAGE_SIZE, q: debouncedSearch }),
     enabled: !!activeOrgId && admin,
   });
+  const members = paged?.items;
   const { data: invites } = useQuery({
     queryKey: ["invites", activeOrgId],
     queryFn: () => api.invites(activeOrgId),
@@ -50,20 +74,24 @@ export default function Members() {
     mutationFn: (inviteId: string) => api.resendInvite(activeOrgId, inviteId),
   });
 
+  // If removing the last member on a page empties it (and it's not page 1),
+  // step back a page rather than showing a stranded empty page.
+  useEffect(() => {
+    if (paged && paged.items.length === 0 && page > 1) setPage(page - 1);
+  }, [paged, page]);
+
   if (!admin) return <Navigate to="/" replace />;
 
-  // Which members can I manage? SA manages everyone below them; Admins manage
-  // Developers/Clients only. Nobody manages the SA or themselves.
   const canManage = (m: OrgMember) =>
     m.role !== "SUPER_ADMIN" && m.userId !== me?.id && (sa || m.role !== "ADMIN");
 
   const pending = (invites ?? []).filter((i) => i.status === "PENDING");
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-8">
       <div>
         <div className="eyebrow mb-1">{activeOrg?.name}</div>
-        <h1 className="text-2xl font-bold tracking-tight">Members</h1>
+        <h1 className="text-2xl font-bold tracking-tight text-fg">Members</h1>
       </div>
 
       <InviteForm orgId={activeOrgId} canInviteAdmin={sa} />
@@ -71,11 +99,11 @@ export default function Members() {
       {pending.length > 0 && (
         <section>
           <div className="eyebrow mb-3">Pending invites</div>
-          <div className="card divide-line">
+          <div className="card divide-line overflow-hidden">
             {pending.map((i) => (
-              <div key={i.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+              <div key={i.id} className="flex flex-wrap items-center gap-3 px-5 py-3.5">
                 <div className="min-w-0 flex-1">
-                  <div className="font-medium">{i.email}</div>
+                  <div className="font-medium text-fg">{i.email}</div>
                   <div className="text-xs text-muted">
                     {i.role.toLowerCase()} · expires {new Date(i.expiresAt).toLocaleDateString()}
                   </div>
@@ -106,20 +134,38 @@ export default function Members() {
       )}
 
       <section>
-        <div className="eyebrow mb-3">Members</div>
-        <div className="card divide-line">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="eyebrow">Members</div>
+          <div className="relative" style={{ minWidth: 240 }}>
+            <IconSearch size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+            <input
+              className="input pl-9"
+              placeholder="Search members…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="card divide-line overflow-hidden">
+          {members?.length === 0 && (
+            <div className="px-5 py-10 text-center text-sm font-medium text-fg-soft">
+              {debouncedSearch ? `No members match "${debouncedSearch}".` : "No members yet."}
+            </div>
+          )}
           {members?.map((m) => (
-            <div key={m.membershipId} className="flex flex-wrap items-center gap-3 px-4 py-3">
-              <Avatar name={m.name} url={m.avatarUrl} size={30} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">{m.name}</span>
-                  {m.userId === me?.id && <span className="eyebrow">You</span>}
-                  {m.disabled && <span className="badge b-danger">Disabled</span>}
-                  {m.role === "SUPER_ADMIN" && <span className="badge b-sage">Super Admin</span>}
+            <div key={m.membershipId} className="flex flex-wrap items-center gap-3 px-5 py-3.5">
+             <Link to={`/members/${m.userId}`} className="flex min-w-0 flex-1 items-center gap-3 rounded-lg -m-1.5 p-1.5 transition-colors hover:bg-accent/50">
+                <Avatar name={m.name} url={m.avatarUrl} size={34} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-fg">{m.name}</span>
+                    {m.userId === me?.id && <span className="eyebrow">You</span>}
+                    {m.disabled && <span className="badge b-danger">Disabled</span>}
+                    {m.role === "SUPER_ADMIN" && <span className="badge b-sage">Super Admin</span>}
+                  </div>
+                  <div className="text-xs text-muted">{m.email}</div>
                 </div>
-                <div className="text-xs text-muted">{m.email}</div>
-              </div>
+              </Link>
 
               {canManage(m) ? (
                 <div className="flex items-center gap-2">
@@ -159,6 +205,14 @@ export default function Members() {
             {(patchMember.error as any)?.response?.data?.error ?? "Update failed."}
           </p>
         )}
+        {paged && (
+          <Pagination
+            page={paged.page}
+            total={paged.total}
+            pageSize={paged.pageSize}
+            onPageChange={setPage}
+          />
+        )}
       </section>
 
       <ConfirmModal
@@ -181,8 +235,14 @@ export default function Members() {
 function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: boolean }) {
   const qc = useQueryClient();
   const [email, setEmail] = useState("");
+  const [emailTouched, setEmailTouched] = useState(false);
   const [role, setRole] = useState("DEVELOPER");
   const [projectIds, setProjectIds] = useState<string[]>([]);
+
+  const emailTrimmed = email.trim();
+  // Only flags once there's a domain to judge, so the error doesn't flash
+  // while the person is still typing the local part.
+  const domainInvalid = emailTrimmed.includes("@") && !isAllowedEmailDomain(emailTrimmed);
 
   const { data: projects } = useQuery({
     queryKey: ["projects", orgId],
@@ -195,36 +255,41 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
       api.invite(orgId, {
         email: email.trim(),
         role,
-        ...(role === "CLIENT" ? { projectIds } : {}),
+        ...(role === "CLIENT" || role === "DEVELOPER" ? { projectIds } : {}),
       }),
     onSuccess: () => {
       setEmail("");
+      setEmailTouched(false);
       setProjectIds([]);
       qc.invalidateQueries({ queryKey: ["invites", orgId] });
     },
   });
 
   const canSubmit =
-    !!email.trim() && (role !== "CLIENT" || projectIds.length > 0) && !mut.isPending;
+    !!emailTrimmed &&
+    !domainInvalid &&
+    (role !== "CLIENT" || projectIds.length > 0) &&
+    !mut.isPending;
 
   return (
-    <div className="card p-3">
-      <div className="flex flex-wrap items-end gap-2">
+    <div className="card p-5">
+      <div className="flex flex-wrap items-end gap-3">
         <div className="flex-1" style={{ minWidth: 200 }}>
-          <div className="eyebrow mb-1">Email</div>
-          <input
-            className="input"
-            type="email"
-            placeholder="person@example.com"
+          <div className="eyebrow mb-1.5">Email</div>
+          <EmailDomainInput
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={setEmail}
+            onBlur={() => setEmailTouched(true)}
           />
+          {emailTouched && emailTrimmed && domainInvalid && (
+            <p className="mt-1.5 text-xs text-danger">Please enter a valid email address.</p>
+          )}
         </div>
         <div style={{ minWidth: 150 }}>
-          <div className="eyebrow mb-1">Role</div>
+          <div className="eyebrow mb-1.5">Role</div>
           <Dropdown
             value={role}
-            onChange={setRole}
+            onChange={(v) => { setRole(v); setProjectIds([]); }}
             options={[
               ...(canInviteAdmin ? [{ value: "ADMIN", label: "Admin" }] : []),
               { value: "DEVELOPER", label: "Developer" },
@@ -234,7 +299,7 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
         </div>
         {role === "CLIENT" && (
           <div className="flex-1" style={{ minWidth: 180 }}>
-            <div className="eyebrow mb-1">Projects</div>
+            <div className="eyebrow mb-1.5">Projects</div>
             <MultiDropdown
               values={projectIds}
               onChange={setProjectIds}
@@ -243,7 +308,19 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
             />
           </div>
         )}
+        {role === "DEVELOPER" && (
+          <div className="flex-1" style={{ minWidth: 180 }}>
+            <div className="eyebrow mb-1.5">Projects (optional)</div>
+            <MultiDropdown
+              values={projectIds}
+              onChange={setProjectIds}
+              placeholder="Assign to projects…"
+              options={(projects ?? []).map((p) => ({ value: p.id, label: p.name }))}
+            />
+          </div>
+        )}
         <button className="btn btn-primary btn-sm" disabled={!canSubmit} onClick={() => mut.mutate()}>
+          <IconPlus size={15} />
           {mut.isPending ? "Creating…" : "Create invite"}
         </button>
       </div>
@@ -255,7 +332,7 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
       )}
 
       {mut.data && (
-        <div className="card-subtle mt-3 p-3">
+        <div className="card-subtle mt-4 p-4">
           <p className="mb-2 text-xs text-fg-soft">
             Invite emailed. You can also share the link directly — the invitee uses it to set up
             their account (or accept with an existing one):
@@ -270,8 +347,8 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
 function CopyLink({ url }: { url: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="flex min-w-64 flex-1 items-center gap-1">
-      <input readOnly value={url} className="input text-xs" style={{ padding: "4px 6px" }} />
+    <div className="flex min-w-64 flex-1 items-center gap-1.5">
+      <input readOnly value={url} className="input text-xs" style={{ padding: "6px 8px" }} />
       <button
         className="btn btn-secondary btn-sm shrink-0"
         onClick={() => {

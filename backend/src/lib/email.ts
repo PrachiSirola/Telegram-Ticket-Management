@@ -1,10 +1,38 @@
-import { Resend } from "resend";
-import nodemailer from "nodemailer";
 import { env } from "../env.js";
 
-// Driver precedence: local SMTP (Mailpit) → Resend → console log.
-const smtp = env.email.smtpUrl ? nodemailer.createTransport(env.email.smtpUrl) : null;
-const resend = !smtp && env.email.resendApiKey ? new Resend(env.email.resendApiKey) : null;
+/*
+  Email delivery via Brevo's HTTP API.
+
+  History, for the next person who touches this file: every previous
+  version of this file used Nodemailer over raw SMTP (ports 465/587)
+  to Gmail. That worked perfectly from a local machine but reliably
+  timed out (`ETIMEDOUT`, `command: 'CONN'`) when running on Render —
+  even after ruling out every configuration issue along the way (wrong
+  IP family, wrong Nodemailer version, wrong port). The conclusion,
+  confirmed by the local/Render split (identical code, identical
+  credentials, only the network differs): Render blocks outbound SMTP
+  ports from its containers. This is a known restriction on several
+  free-tier PaaS platforms, to stop their shared IP ranges from being
+  used to relay spam — no amount of client-side configuration can get
+  a raw SMTP connection through it.
+
+  The fix is to stop using SMTP entirely. Brevo's API sends email over
+  a normal HTTPS POST request (port 443) — indistinguishable from any
+  other outbound API call your app already makes, so it isn't affected
+  by SMTP-specific port blocking. Free tier: 300 emails/day, and unlike
+  Resend's default sender, Brevo's single-sender verification lets you
+  verify one email address you already own (e.g. your Gmail) by
+  clicking a confirmation link — no domain or DNS records required —
+  and then send to any recipient, not just yourself.
+
+  Setup (one-time, in the Brevo dashboard):
+    1. Sign up at brevo.com (free).
+    2. Settings → Senders, Domains & Dedicated IPs → add your email as
+       a sender → click the verification link Brevo emails you.
+    3. Settings → SMTP & API → API Keys → generate a new key.
+    4. Set on Render: BREVO_API_KEY=<that key>, and make sure
+       SMTP_FROM matches the exact address you verified as a sender.
+*/
 
 interface SendEmailOpts {
   to: string;
@@ -13,62 +41,168 @@ interface SendEmailOpts {
   text: string;
 }
 
+/** Parses "Name <email@example.com>" or a bare "email@example.com" into
+ *  Brevo's { name, email } sender shape. */
+function parseSender(from: string): { name?: string; email: string } {
+  const match = from.match(/^(.*)<(.+)>$/);
+  if (match) {
+    return { name: match[1].trim().replace(/^"|"$/g, ""), email: match[2].trim() };
+  }
+  return { email: from.trim() };
+}
+
 /**
- * Send a transactional email. In local dev, set SMTP_URL=smtp://localhost:1025
- * and every email lands in the Mailpit inbox (http://localhost:8025) — any
- * recipient address, nothing leaves your machine. With RESEND_API_KEY set
- * (and no SMTP_URL), sends via Resend. With neither, logs to the console.
- * Never throws.
+ * Send a transactional email via Brevo's HTTP API. Falls back to logging to
+ * the console if BREVO_API_KEY isn't set (e.g. local dev without email
+ * configured). Never throws — a failed email should never break the
+ * request that triggered it (signup, invite, password reset).
  */
 export async function sendEmail(opts: SendEmailOpts) {
-  try {
-    if (smtp) {
-      await smtp.sendMail({
-        from: env.email.from,
-        to: opts.to,
-        subject: opts.subject,
-        html: opts.html,
-        text: opts.text,
-      });
-      return;
-    }
-    if (resend) {
-      const { error } = await resend.emails.send({
-        from: env.email.from,
-        to: opts.to,
-        subject: opts.subject,
-        html: opts.html,
-        text: opts.text,
-      });
-      if (error) console.error("[email] send failed:", error);
-      return;
-    }
+  if (!env.email.enabled) {
     console.log(
       `\n[email:console] to=${opts.to} subject="${opts.subject}"\n${opts.text}\n`,
     );
+    return;
+  }
+  try {
+    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "api-key": env.email.brevoApiKey,
+      },
+      body: JSON.stringify({
+        sender: parseSender(env.email.from),
+        to: [{ email: opts.to }],
+        subject: opts.subject,
+        htmlContent: opts.html,
+        textContent: opts.text,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`[email] send failed: ${res.status} ${res.statusText} — ${body}`);
+      return;
+    }
+
+    const data = (await res.json()) as { messageId?: string };
+    console.log("[email] sent:", data.messageId, "to", opts.to);
   } catch (err) {
     console.error("[email] send error:", err);
   }
 }
 
+const BRAND_BG = "#2c1810";
+const BRAND_TEXT = "#ffffff";
+const PRIMARY = "#92613a";
+const PRIMARY_HOVER = "#7a5030";
+const BODY_BG = "#f5f0ea";
+const CARD_BG = "#ffffff";
+const TEXT_DARK = "#2c1810";
+const TEXT_MID = "#5c4436";
+const TEXT_MUTED = "#a08b7a";
+const BORDER = "#e8ded2";
+
+function emailShell(content: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tickets</title>
+</head>
+<body style="margin:0;padding:0;background:${BODY_BG};font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:${TEXT_DARK};-webkit-font-smoothing:antialiased;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BODY_BG};">
+    <tr>
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background:${BRAND_BG};padding:28px 32px;border-radius:16px 16px 0 0;text-align:center;">
+              <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+                <tr>
+                  <td style="background:${PRIMARY};width:36px;height:36px;border-radius:10px;text-align:center;vertical-align:middle;font-weight:800;font-size:18px;color:#fff;">T</td>
+                  <td style="padding-left:12px;">
+                    <div style="font-size:18px;font-weight:700;color:${BRAND_TEXT};line-height:1.2;">Tickets</div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:0.08em;text-transform:uppercase;">Ticket Management</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Body card -->
+          <tr>
+            <td style="background:${CARD_BG};padding:36px 32px 28px;border-left:1px solid ${BORDER};border-right:1px solid ${BORDER};">
+              ${content}
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background:${CARD_BG};padding:20px 32px 28px;border-top:1px solid ${BORDER};border-left:1px solid ${BORDER};border-right:1px solid ${BORDER};border-radius:0 0 16px 16px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding-bottom:12px;border-top:1px solid ${BORDER};padding-top:20px;">
+                    <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:${TEXT_DARK};">Tickets — Ticket Management</p>
+                    <p style="margin:0 0 4px;font-size:12px;color:${TEXT_MUTED};">Built by your team · <a href="mailto:support@example.com" style="color:${PRIMARY};text-decoration:none;">Contact support</a></p>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <p style="margin:0;font-size:11px;color:${TEXT_MUTED};line-height:1.5;">You received this email because you have an account on Tickets. If you didn't expect this, you can safely ignore it.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+function ctaButton(text: string, url: string): string {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+  <tr>
+    <td style="background:${PRIMARY};border-radius:10px;text-align:center;">
+      <a href="${url}" target="_blank" style="display:inline-block;padding:13px 32px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;letter-spacing:0.02em;">
+        ${text}
+      </a>
+    </td>
+  </tr>
+</table>`;
+}
+
+function otpBlock(code: string): string {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+  <tr>
+    <td style="background:${BODY_BG};border:2px solid ${BORDER};border-radius:12px;padding:16px 36px;text-align:center;">
+      <span style="font-size:36px;font-weight:800;letter-spacing:12px;color:${TEXT_DARK};font-family:'Courier New',Courier,monospace;">${code}</span>
+    </td>
+  </tr>
+</table>`;
+}
+
+/* ─────────────────────────────────────────────────────────
+   Email templates
+   ───────────────────────────────────────────────────────── */
+
 export function signupOtpEmail(name: string, code: string): SendEmailOpts {
-  const text = `Hi ${name},
+  const text = `Hi ${name},\n\nYour Tickets verification code is:\n\n${code}\n\nEnter it to finish creating your organisation. The code expires in 15 minutes.\n\nIf you didn't request this, you can safely ignore this email.`;
 
-Your Tickets verification code is:
-
-${code}
-
-Enter it to finish creating your organisation. The code expires in 15 minutes.
-
-If you didn't request this, you can safely ignore this email.`;
-
-  const html = `
-  <div style="font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #0f172a;">
-    <h2 style="margin: 0 0 12px;">Verify your email</h2>
-    <p style="margin: 0 0 16px; color: #475569;">Hi ${name}, enter this code to finish creating your organisation:</p>
-    <p style="margin: 0 0 24px; font-size: 32px; font-weight: 700; letter-spacing: 8px;">${code}</p>
-    <p style="margin: 0; color: #64748b; font-size: 13px;">The code expires in 15 minutes. If you didn't request it, ignore this email.</p>
-  </div>`;
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">Verify your email</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:${TEXT_MID};line-height:1.6;">Hi <strong>${name}</strong>, use the code below to verify your email. It expires in <strong>15 minutes</strong>.</p>
+    ${otpBlock(code)}
+    <p style="margin:24px 0 0;font-size:13px;color:${TEXT_MUTED};text-align:center;">If you didn't request this, you can safely ignore this email.</p>
+  `);
 
   return { to: "", subject: "Your Tickets verification code", html, text };
 }
@@ -84,52 +218,129 @@ export function inviteEmail(opts: {
   const projectLine =
     opts.projectNames.length > 0 ? ` on ${opts.projectNames.join(", ")}` : "";
 
-  const text = `Hi,
+  const text = `Hi,\n\n${opts.inviterName} invited you to join ${opts.orgName} on Tickets as ${roleLabel}${projectLine}.\n\nUse this link to set up your account (or sign in if you already have one):\n\n${opts.inviteUrl}\n\nThe invite expires in 14 days. If you weren't expecting this, you can ignore this email.`;
 
-${opts.inviterName} invited you to join ${opts.orgName} on Tickets as ${roleLabel}${projectLine}.
-
-Use this link to set up your account (or sign in if you already have one):
-
-${opts.inviteUrl}
-
-The invite expires in 14 days. If you weren't expecting this, you can ignore this email.`;
-
-  const html = `
-  <div style="font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #0f172a;">
-    <h2 style="margin: 0 0 12px;">Join ${opts.orgName}</h2>
-    <p style="margin: 0 0 16px; color: #475569;">
-      ${opts.inviterName} invited you to join <strong>${opts.orgName}</strong> on Tickets as
-      <strong>${roleLabel}</strong>${projectLine}.
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">You're invited! 🎉</h2>
+    <p style="margin:0 0 20px;font-size:15px;color:${TEXT_MID};line-height:1.6;">
+      <strong>${opts.inviterName}</strong> invited you to join <strong>${opts.orgName}</strong> on Tickets as <strong>${roleLabel}</strong>${projectLine}.
     </p>
-    <p style="margin: 0 0 24px;">
-      <a href="${opts.inviteUrl}" style="background: #4f46e5; color: #fff; padding: 10px 18px; border-radius: 8px; text-decoration: none; display: inline-block;">Accept invite</a>
-    </p>
-    <p style="margin: 0 0 8px; color: #64748b; font-size: 13px;">The invite expires in 14 days. If you weren't expecting this, ignore this email.</p>
-    <p style="margin: 16px 0 0; color: #94a3b8; font-size: 12px; word-break: break-all;">${opts.inviteUrl}</p>
-  </div>`;
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;background:${BODY_BG};border-radius:10px;padding:0;">
+      <tr>
+        <td style="padding:16px 20px;">
+          <table role="presentation" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding-bottom:6px;font-size:12px;color:${TEXT_MUTED};text-transform:uppercase;letter-spacing:0.08em;font-weight:600;">Organisation</td>
+            </tr>
+            <tr>
+              <td style="font-size:15px;font-weight:600;color:${TEXT_DARK};">${opts.orgName}</td>
+            </tr>
+          </table>
+        </td>
+        <td style="padding:16px 20px;">
+          <table role="presentation" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding-bottom:6px;font-size:12px;color:${TEXT_MUTED};text-transform:uppercase;letter-spacing:0.08em;font-weight:600;">Your role</td>
+            </tr>
+            <tr>
+              <td style="font-size:15px;font-weight:600;color:${PRIMARY};">${roleLabel}</td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+    ${ctaButton("Accept invitation", opts.inviteUrl)}
+    <p style="margin:20px 0 0;font-size:12px;color:${TEXT_MUTED};text-align:center;line-height:1.5;">This invite expires in 14 days. If you weren't expecting this, you can safely ignore it.</p>
+    <p style="margin:12px 0 0;font-size:11px;color:${TEXT_MUTED};text-align:center;word-break:break-all;">${opts.inviteUrl}</p>
+  `);
 
   return { to: "", subject: `You've been invited to ${opts.orgName} on Tickets`, html, text };
 }
 
 export function passwordResetEmail(name: string, resetUrl: string): SendEmailOpts {
-  const text = `Hi ${name},
+  const text = `Hi ${name},\n\nWe received a request to reset your Tickets password. Use the link below to choose a new one. This link expires in 1 hour.\n\n${resetUrl}\n\nIf you didn't request this, you can safely ignore this email — your password won't change.`;
 
-We received a request to reset your Tickets password. Use the link below to choose a new one. This link expires in 1 hour.
-
-${resetUrl}
-
-If you didn't request this, you can safely ignore this email — your password won't change.`;
-
-  const html = `
-  <div style="font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #0f172a;">
-    <h2 style="margin: 0 0 12px;">Reset your password</h2>
-    <p style="margin: 0 0 16px; color: #475569;">Hi ${name}, we received a request to reset your Tickets password.</p>
-    <p style="margin: 0 0 24px;">
-      <a href="${resetUrl}" style="background: #4f46e5; color: #fff; padding: 10px 18px; border-radius: 8px; text-decoration: none; display: inline-block;">Choose a new password</a>
-    </p>
-    <p style="margin: 0 0 8px; color: #64748b; font-size: 13px;">This link expires in 1 hour. If you didn't request it, ignore this email — your password won't change.</p>
-    <p style="margin: 16px 0 0; color: #94a3b8; font-size: 12px; word-break: break-all;">${resetUrl}</p>
-  </div>`;
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">Reset your password</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:${TEXT_MID};line-height:1.6;">Hi <strong>${name}</strong>, we received a request to reset your Tickets password. Click below to choose a new one.</p>
+    ${ctaButton("Choose a new password", resetUrl)}
+    <p style="margin:24px 0 0;font-size:13px;color:${TEXT_MUTED};text-align:center;">This link expires in <strong>1 hour</strong>. If you didn't request it, ignore this email — your password won't change.</p>
+    <p style="margin:12px 0 0;font-size:11px;color:${TEXT_MUTED};text-align:center;word-break:break-all;">${resetUrl}</p>
+  `);
 
   return { to: "", subject: "Reset your Tickets password", html, text };
+}
+
+export function pinResetEmail(name: string, resetUrl: string): SendEmailOpts {
+  const text = `Hi ${name},\n\nWe received a request to reset your Tickets 2FA PIN. Use the link below to set a new one. This link expires in 1 hour.\n\n${resetUrl}\n\nIf you didn't request this, you can safely ignore this email — your PIN won't change.`;
+
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">Reset your 2FA PIN</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:${TEXT_MID};line-height:1.6;">Hi <strong>${name}</strong>, we received a request to reset your Tickets two-factor PIN. Click below to choose a new one.</p>
+    ${ctaButton("Choose a new PIN", resetUrl)}
+    <p style="margin:24px 0 0;font-size:13px;color:${TEXT_MUTED};text-align:center;">This link expires in <strong>1 hour</strong>. If you didn't request it, ignore this email — your PIN won't change.</p>
+    <p style="margin:12px 0 0;font-size:11px;color:${TEXT_MUTED};text-align:center;word-break:break-all;">${resetUrl}</p>
+  `);
+
+  return { to: "", subject: "Reset your Tickets 2FA PIN", html, text };
+}
+
+export function passwordChangedEmail(name: string): SendEmailOpts {
+  const text = `Hi ${name},\n\nYour Tickets password was just changed. If this was you, no action is needed.\n\nIf you didn't make this change, please reset your password immediately or contact support.`;
+
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">Password changed</h2>
+    <p style="margin:0 0 20px;font-size:15px;color:${TEXT_MID};line-height:1.6;">Hi <strong>${name}</strong>, your Tickets password was just changed successfully.</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td style="background:${BODY_BG};border-radius:10px;padding:16px 20px;">
+          <p style="margin:0;font-size:14px;color:${TEXT_MID};line-height:1.6;">
+            ✅ &nbsp;If this was you, no action is needed.<br/>
+            ⚠️ &nbsp;If you didn't make this change, <a href="mailto:support@example.com" style="color:${PRIMARY};font-weight:600;text-decoration:none;">contact support</a> immediately.
+          </p>
+        </td>
+      </tr>
+    </table>
+  `);
+
+  return { to: "", subject: "Your Tickets password was changed", html, text };
+}
+
+export function welcomeEmail(name: string, loginUrl: string): SendEmailOpts {
+  const text = `Welcome to Tickets, ${name}!\n\nYour account is set up and your organisation is ready. Sign in to start creating projects and managing tickets.\n\n${loginUrl}\n\nWelcome aboard!`;
+
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">Welcome to Tickets! 🎉</h2>
+    <p style="margin:0 0 20px;font-size:15px;color:${TEXT_MID};line-height:1.6;">Hi <strong>${name}</strong>, your account is set up and your organisation is ready to go.</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+      <tr>
+        <td style="background:${BODY_BG};border-radius:10px;padding:16px 20px;">
+          <p style="margin:0 0 10px;font-size:14px;font-weight:600;color:${TEXT_DARK};">Here's what you can do:</p>
+          <p style="margin:0;font-size:14px;color:${TEXT_MID};line-height:1.8;">
+            📁 &nbsp;Create projects to organise your work<br/>
+            🎫 &nbsp;Create and assign tickets to your team<br/>
+            👥 &nbsp;Invite team members with different roles<br/>
+            🔔 &nbsp;Get Telegram notifications for updates
+          </p>
+        </td>
+      </tr>
+    </table>
+    ${ctaButton("Go to your dashboard", loginUrl)}
+  `);
+
+  return { to: "", subject: "Welcome to Tickets!", html, text };
+}
+
+export function orgCreationVerifyEmail(name: string, orgName: string, verifyUrl: string): SendEmailOpts {
+  const text = `Hi ${name},\n\nSomeone (hopefully you) requested to create a new organisation called "${orgName}" on Tickets. If this was you, click the link below to confirm and finish creating it. This link expires in 30 minutes.\n\n${verifyUrl}\n\nIf you didn't request this, ignore this email — no organisation will be created.`;
+
+  const html = emailShell(`
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:${TEXT_DARK};">Confirm it's you</h2>
+    <p style="margin:0 0 24px;font-size:15px;color:${TEXT_MID};line-height:1.6;">Hi <strong>${name}</strong>, someone requested to create a new organisation called <strong>${orgName}</strong>. Click below to confirm and finish creating it.</p>
+    ${ctaButton("Confirm & create organisation", verifyUrl)}
+    <p style="margin:24px 0 0;font-size:13px;color:${TEXT_MUTED};text-align:center;">This link expires in <strong>30 minutes</strong>. If you didn't request this, ignore this email — nothing will be created.</p>
+    <p style="margin:12px 0 0;font-size:11px;color:${TEXT_MUTED};text-align:center;word-break:break-all;">${verifyUrl}</p>
+  `);
+
+  return { to: "", subject: `Confirm: create "${orgName}" on Tickets`, html, text };
 }

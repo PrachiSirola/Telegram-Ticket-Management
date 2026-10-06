@@ -5,12 +5,34 @@ export type TicketPriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
 export type TicketType = "BUG" | "FEATURE" | "TASK";
 export type CommentVisibility = "INTERNAL" | "CLIENT_VISIBLE";
 
+export type WorkRange = "current" | "today" | "week" | "prev_week" | "month" | "prev_month" | "custom";
+export type WorkStatusFilter = "all" | "pending" | "in_progress" | "completed" | "overdue";
+export type ProjectStatusFilter = "new" | "active" | "closed" | undefined;
+
+/** Envelope shape for opt-in server-side pagination (projects, org members). */
+export interface Paged<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface ProjectCounts {
+  all: number;
+  new: number;
+  active: number;
+  closed: number;
+}
+
 export interface Me {
   id: string;
   email: string;
   name: string;
   avatarUrl: string | null;
+  isPlatformSuperAdmin: boolean;
   memberships: { orgId: string; orgName: string; role: OrgRole }[];
+  twoFactorEnabled: boolean;
+  twoFactorMethod: "PIN" | "PASSKEY" | null;
 }
 
 export interface Organization {
@@ -73,6 +95,7 @@ export interface UserLite {
 }
 
 export interface Member extends UserLite {
+  membershipId: string;
   userId: string;
   role: OrgRole;
 }
@@ -131,4 +154,21 @@ export interface Notification {
   createdAt: string;
   payload: { message: string; ticketTitle: string } | null;
   ticket: { id: string; title: string; projectId: string; orgId: string; orgName: string };
+}
+
+export interface CompletedTicket extends Ticket {
+  completedAt: string;
+}
+
+export interface MyWorkSummary {
+  assigned: number;
+  inProgress: number;
+  completed: number;
+  overdue: number;
+}
+
+export interface MyWorkResponse {
+  summary: MyWorkSummary;
+  work: Paged<Ticket>;
+  completedWork: Paged<CompletedTicket>;
 }

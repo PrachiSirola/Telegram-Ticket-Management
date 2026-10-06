@@ -68,6 +68,11 @@ enum NotificationType {
   MENTIONED
 }
 
+enum TwoFactorMethod {
+  PIN
+  PASSKEY
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -89,6 +94,17 @@ model User {
   sentInvites     Invite[]             @relation("InvitedBy")
   attachments     Attachment[]
   passwordResets  PasswordResetToken[]
+   pinResets       PinResetToken[]
+    orgCreationRequests OrgCreationRequest[]
+  platformRole         PlatformRole?
+  platformAdminActive  Boolean       @default(true)
+  passwordHistory PasswordHistory[]
+    twoFactorEnabled Boolean          @default(false)
+  twoFactorMethod  TwoFactorMethod?
+  pinHash          String?
+  pinAttempts      Int              @default(0)
+  pinLockedUntil   DateTime?
+  ticketStatusChanges TicketStatusHistory[] @relation("TicketStatusChanges")
 }
 
 model Organization {
@@ -119,6 +135,7 @@ model OrgMembership {
   org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   projectAccess ProjectClient[]
+  projectDevAccess ProjectDeveloper[]
 
   @@unique([userId, orgId])
   @@index([userId])
@@ -136,6 +153,7 @@ model Project {
   org     Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
   tickets Ticket[]
   clients ProjectClient[]
+  developers ProjectDeveloper[]
 
   @@index([orgId])
 }
@@ -143,6 +161,24 @@ model Project {
 // Attaches a CLIENT membership to a project. Clients only see projects they
 // are attached to; internal roles (SA/ADMIN/DEVELOPER) see all org projects.
 model ProjectClient {
+  id           String   @id @default(cuid())
+  projectId    String
+  membershipId String
+  createdAt    DateTime @default(now())
+
+  project    Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  membership OrgMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, membershipId])
+  @@index([membershipId])
+}
+
+// Explicit developer-to-project assignment. A DEVELOPER sees a project if
+// EITHER they're attached here OR they have a ticket assigned to them in it
+// (see lib/projectAccess.ts) — this table covers the "attached ahead of any
+// ticket" case, e.g. right after being invited to a project with no tickets
+// yet assigned. Mirrors ProjectClient's shape deliberately.
+model ProjectDeveloper {
   id           String   @id @default(cuid())
   projectId    String
   membershipId String
@@ -205,6 +241,55 @@ model PasswordResetToken {
   @@index([userId])
 }
 
+// One-time tokens for the "forgot PIN" flow. Only issuable mid-login, right
+// after the password step has already succeeded (see POST /auth/2fa/forgot-pin) —
+// this is what stops someone without the password from resetting the PIN.
+model PinResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum PlatformRole {
+  SUPER_ADMIN
+}
+
+// A pending "create a new organisation" action, gated behind an email
+// click-to-confirm step so a hijacked session alone can't spin up an org.
+model OrgCreationRequest {
+  id            String    @id @default(cuid())
+  requestedById String
+  orgName       String
+  tokenHash     String    @unique
+  expiresAt     DateTime
+  verifiedAt    DateTime?
+  createdOrgId  String?
+  createdAt     DateTime  @default(now())
+
+  requestedBy User @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+
+  @@index([requestedById])
+}
+
+// Archive of a user's previous password hashes, used to block reuse.
+model PasswordHistory {
+  id           String   @id @default(cuid())
+  userId       String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
 model Ticket {
   id          String         @id @default(cuid())
   projectId   String
@@ -226,9 +311,35 @@ model Ticket {
   comments      Comment[]
   notifications Notification[]
   attachments   Attachment[]
+  statusHistory TicketStatusHistory[]
 
   @@index([projectId, status])
   @@index([assigneeId])
+}
+
+// Records every status transition a ticket goes through. Written once per
+// actual change (see routes/tickets.ts's PATCH handler) — never backfilled
+// retroactively, so tickets that were already DONE before this model existed
+// have no rows here; callers that need a completion date for those fall back
+// to the ticket's `updatedAt` (see lib/myWork.ts).
+//
+// This is the actual source of truth for "when was this ticket completed" —
+// deliberately not `updatedAt`, which changes on ANY edit (title, priority,
+// due date, etc.), not just status changes, and would make "completed this
+// week" drift to "edited this week" for tickets touched after completion.
+model TicketStatusHistory {
+  id          String       @id @default(cuid())
+  ticketId    String
+  fromStatus  TicketStatus?
+  toStatus    TicketStatus
+  changedById String
+  changedAt   DateTime     @default(now())
+
+  ticket    Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  changedBy User   @relation("TicketStatusChanges", fields: [changedById], references: [id])
+
+  @@index([ticketId, changedAt])
+  @@index([toStatus, changedAt])
 }
 
 model Comment {

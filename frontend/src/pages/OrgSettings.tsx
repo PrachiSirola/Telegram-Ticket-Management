@@ -11,7 +11,6 @@ export default function OrgSettings() {
   const { me } = useAuth();
   const { activeOrgId } = useOrg();
 
-  // Admins get the page too, but only the Telegram section.
   if (!isAdminOrAboveIn(me, activeOrgId)) return <Navigate to="/" replace />;
   return <Settings orgId={activeOrgId} sa={isOrgSA(me, activeOrgId)} />;
 }
@@ -28,7 +27,7 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
   const { data: members } = useQuery({
     queryKey: ["orgMembers", orgId],
     queryFn: () => api.orgMembers(orgId),
-    enabled: sa, // only needed for the transfer-ownership picker
+    enabled: sa,
   });
 
   const [name, setName] = useState("");
@@ -44,16 +43,14 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
     if (settings) {
       setName(settings.name);
       setChatId(settings.telegramChatId ?? "");
-      setBotToken(""); // write-only; masked value shown as placeholder
+      setBotToken("");
     }
   }, [settings]);
 
   const save = useMutation({
     mutationFn: () =>
       api.updateOrg(orgId, {
-        // Renaming is SA-only; Admins send Telegram fields only.
         ...(sa ? { name } : {}),
-        // Only send the token if the field was touched; empty string clears it.
         ...(botToken !== "" || !settings?.telegramConfigured ? { telegramBotToken: botToken } : {}),
         telegramChatId: chatId,
       }),
@@ -96,59 +93,39 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
   const transferTarget = admins.find((a) => a.userId === transferTo);
 
   return (
-    <div className="mx-auto max-w-xl space-y-8">
+    <div className="mx-auto max-w-xl space-y-6">
       <div>
         <div className="eyebrow mb-1">Organisation</div>
-        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
+        <h1 className="text-2xl font-bold tracking-tight text-fg">Settings</h1>
       </div>
 
-      {/* General + Telegram */}
       <div className="card p-6">
-        <div className="eyebrow mb-3">{sa ? "General" : "Notifications"}</div>
-        <div className="grid gap-3">
+        <div className="eyebrow mb-4">{sa ? "General" : "Notifications"}</div>
+        <div className="grid gap-4">
           {sa && (
-            <label className="grid gap-1 text-sm">
-              <span className="text-fg-soft">Organisation name</span>
-              <input
-                className="input"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                maxLength={100}
-              />
-            </label>
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-fg-soft">Organisation name</label>
+              <input className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
+            </div>
           )}
 
-          <div className={sa ? "eyebrow mt-3" : "eyebrow"}>Telegram notifications</div>
-          <p className="-mt-1 text-xs text-fg-soft">
+          <div className={sa ? "eyebrow mt-2" : "eyebrow"}>Telegram notifications</div>
+          <p className="-mt-2 text-xs text-fg-soft">
             Create a bot via @BotFather, add it to your team chat, and paste the details here.
             Ticket events will be posted to that chat.
             {settings?.telegramConfigured && " Currently configured."}
           </p>
-          <label className="grid gap-1 text-sm">
-            <span className="text-fg-soft">Bot token</span>
-            <input
-              className="input"
-              value={botToken}
-              onChange={(e) => setBotToken(e.target.value)}
-              placeholder={settings?.telegramBotToken ?? "123456:ABC…"}
-            />
-          </label>
-          <label className="grid gap-1 text-sm">
-            <span className="text-fg-soft">Chat ID</span>
-            <input
-              className="input"
-              value={chatId}
-              onChange={(e) => setChatId(e.target.value)}
-              placeholder="-100123456789"
-            />
-          </label>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-fg-soft">Bot token</label>
+            <input className="input" value={botToken} onChange={(e) => setBotToken(e.target.value)} placeholder={settings?.telegramBotToken ?? "123456:ABC…"} />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-fg-soft">Chat ID</label>
+            <input className="input" value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="-100123456789" />
+          </div>
 
           <div className="flex items-center gap-3">
-            <button
-              className="btn btn-primary"
-              disabled={(sa && !name.trim()) || save.isPending}
-              onClick={() => save.mutate()}
-            >
+            <button className="btn btn-primary" disabled={(sa && !name.trim()) || save.isPending} onClick={() => save.mutate()}>
               {save.isPending ? "Saving…" : "Save settings"}
             </button>
             {msg && (
@@ -158,10 +135,9 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
         </div>
       </div>
 
-      {/* Transfer ownership (SA only) */}
       {sa && (
       <div className="card p-6">
-        <div className="eyebrow mb-3">Transfer ownership</div>
+        <div className="eyebrow mb-4">Transfer ownership</div>
         {admins.length === 0 ? (
           <p className="text-sm text-fg-soft">
             Promote a member to Admin first — ownership can only be transferred to an Admin.
@@ -171,7 +147,7 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
             <p className="mb-3 text-sm text-fg-soft">
               Hand the Super Admin role to an Admin. You'll become an Admin of this organisation.
             </p>
-            <div className="flex flex-wrap items-end gap-2">
+            <div className="flex flex-wrap items-end gap-3">
               <div className="flex-1" style={{ minWidth: 200 }}>
                 <Dropdown
                   placeholder="Choose an Admin…"
@@ -180,11 +156,7 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
                   options={admins.map((a) => ({ value: a.userId, label: `${a.name} (${a.email})` }))}
                 />
               </div>
-              <button
-                className="btn btn-danger btn-sm"
-                disabled={!transferTo}
-                onClick={() => setConfirmTransfer(true)}
-              >
+              <button className="btn btn-danger btn-sm" disabled={!transferTo} onClick={() => setConfirmTransfer(true)}>
                 Transfer
               </button>
             </div>
@@ -193,10 +165,9 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
       </div>
       )}
 
-      {/* Danger zone (SA only) */}
       {sa && (
-      <div className="card p-6">
-        <div className="eyebrow mb-3">Danger zone</div>
+      <div className="card border-danger/30 p-6">
+        <div className="eyebrow mb-4 text-danger">Danger zone</div>
         <p className="mb-3 text-sm text-fg-soft">
           Deleting the organisation permanently removes all projects, tickets, comments,
           attachments, and memberships.
@@ -207,69 +178,36 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
       </div>
       )}
 
-      {/* Transfer confirm */}
-      <Modal
-        open={confirmTransfer}
-        onClose={() => setConfirmTransfer(false)}
-        title="Transfer ownership?"
-      >
+      <Modal open={confirmTransfer} onClose={() => setConfirmTransfer(false)} title="Transfer ownership?">
         <p className="mb-4 text-sm text-fg-soft">
           <b>{transferTarget?.name}</b> will become the Super Admin of <b>{settings?.name}</b>, and
           you ({me?.name}) will become an Admin. This can only be reversed by the new owner.
         </p>
         <div className="flex justify-end gap-2">
-          <button className="btn btn-secondary btn-sm" onClick={() => setConfirmTransfer(false)}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-danger btn-sm"
-            disabled={transfer.isPending}
-            onClick={() => transfer.mutate()}
-          >
+          <button className="btn btn-secondary btn-sm" onClick={() => setConfirmTransfer(false)}>Cancel</button>
+          <button className="btn btn-danger btn-sm" disabled={transfer.isPending} onClick={() => transfer.mutate()}>
             {transfer.isPending ? "Transferring…" : "Transfer ownership"}
           </button>
         </div>
       </Modal>
 
-      {/* Delete confirm */}
       <Modal
         open={showDelete}
-        onClose={() => {
-          setShowDelete(false);
-          setConfirmDeleteText("");
-        }}
+        onClose={() => { setShowDelete(false); setConfirmDeleteText(""); }}
         title="Delete organisation"
       >
         <p className="mb-3 text-sm text-fg-soft">
           This permanently deletes <b>{settings?.name}</b> and{" "}
           <span className="text-danger">everything in it</span>. This cannot be undone.
         </p>
-        <div className="eyebrow mb-1">
+        <div className="eyebrow mb-1.5">
           Type <span style={{ color: "var(--fg)", textTransform: "none" }}>{settings?.name}</span>{" "}
           to confirm
         </div>
-        <input
-          className="input mb-4"
-          value={confirmDeleteText}
-          onChange={(e) => setConfirmDeleteText(e.target.value)}
-          placeholder={settings?.name}
-          autoFocus
-        />
+        <input className="input mb-4" value={confirmDeleteText} onChange={(e) => setConfirmDeleteText(e.target.value)} placeholder={settings?.name} autoFocus />
         <div className="flex justify-end gap-2">
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={() => {
-              setShowDelete(false);
-              setConfirmDeleteText("");
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            className="btn btn-danger btn-sm"
-            disabled={confirmDeleteText.trim() !== settings?.name || del.isPending}
-            onClick={() => del.mutate()}
-          >
+          <button className="btn btn-secondary btn-sm" onClick={() => { setShowDelete(false); setConfirmDeleteText(""); }}>Cancel</button>
+          <button className="btn btn-danger btn-sm" disabled={confirmDeleteText.trim() !== settings?.name || del.isPending} onClick={() => del.mutate()}>
             {del.isPending ? "Deleting…" : "Delete organisation"}
           </button>
         </div>

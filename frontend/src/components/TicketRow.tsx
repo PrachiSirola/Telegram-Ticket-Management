@@ -1,34 +1,92 @@
 import { Link } from "react-router-dom";
 import type { Ticket } from "../types";
-import { Avatar, PriorityBadge, StatusBadge, TypeBadge } from "./ui";
+import {
+  Avatar,
+  PriorityBadge,
+  StatusBadge,
+  TypeBadge,
+} from "./ui";
+import { IconArrowRight } from "./Icons";
 
-export function TicketRow({ ticket, showProject }: { ticket: Ticket; showProject?: boolean }) {
+export function TicketRow({
+  ticket,
+  showProject,
+}: {
+  ticket: Ticket;
+  showProject?: boolean;
+}) {
   return (
     <Link
       to={`/tickets/${ticket.id}`}
-      className="flex items-center gap-3 px-4 py-3.5 hover:bg-accent"
+      className="
+        group
+        flex
+        items-center
+        justify-between
+        gap-5
+        border-b
+        border-card-border/60
+        px-5
+        py-4
+        transition-all
+        duration-200
+        hover:bg-accent
+      "
     >
       <div className="min-w-0 flex-1">
-        <div className="truncate font-medium text-fg">{ticket.title}</div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+
+        <div className="flex items-center gap-3">
+          <h3 className="truncate text-[14px] font-semibold text-fg transition-colors group-hover:text-primary">
+            {ticket.title}
+          </h3>
+
+          {showProject && ticket.project && (
+            <span className="rounded-full bg-accent px-2.5 py-0.5 text-[11px] font-medium text-primary">
+              {ticket.project.name}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <StatusBadge status={ticket.status} />
           <PriorityBadge priority={ticket.priority} />
           <TypeBadge type={ticket.type} />
-          {showProject && ticket.project && (
-            <span className="eyebrow ml-1">{ticket.project.name}</span>
-          )}
           {ticket.dueDate && (
-            <span className="ml-1 text-xs text-muted">
-              due {new Date(ticket.dueDate).toLocaleDateString()}
+            <span className="rounded-full border border-card-border px-2.5 py-0.5 text-[11px] text-muted">
+              Due {new Date(ticket.dueDate).toLocaleDateString()}
             </span>
           )}
         </div>
       </div>
-      {ticket.assignee ? (
-        <Avatar name={ticket.assignee.name} url={ticket.assignee.avatarUrl} />
-      ) : (
-        <span className="eyebrow">Unassigned</span>
-      )}
+
+      <div className="flex items-center gap-4">
+        {ticket.assignee ? (
+          <div className="flex items-center gap-2.5">
+            <Avatar
+              name={ticket.assignee.name}
+              url={ticket.assignee.avatarUrl}
+              size={32}
+            />
+            <div className="hidden lg:block">
+              <div className="text-sm font-medium text-fg">
+                {ticket.assignee.name}
+              </div>
+              <div className="text-[11px] text-muted">
+                Assignee
+              </div>
+            </div>
+          </div>
+        ) : (
+          <span className="rounded-full border border-dashed border-card-border px-3 py-1 text-xs text-muted">
+            Unassigned
+          </span>
+        )}
+
+        <IconArrowRight
+          size={16}
+          className="text-muted opacity-0 transition-all group-hover:opacity-100 group-hover:text-primary"
+        />
+      </div>
     </Link>
   );
 }

@@ -17,8 +17,6 @@
 # One-time setup after the first deploy (values marked `sync: false`):
 #   - API  FRONTEND_URL        = https://ticket-mgmt-web.onrender.com
 #   - Web  VITE_API_URL        = https://ticket-mgmt-api.onrender.com  (then redeploy Web)
-#   - API  RESEND_API_KEY      = your Resend key (signup OTPs + password resets)
-#   - API  EMAIL_FROM          = a Resend-verified sender, e.g. "Tickets <no-reply@yourdomain.com>"
 #   Telegram is configured per organisation in-app (Org Settings), not via env.
 
 databases:
@@ -55,9 +53,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: FRONTEND_URL
-        sync: false
-      - key: RESEND_API_KEY
-        sync: false # signup OTPs + password resets; console fallback if unset
+        sync: false # set to this app's real deployed frontend URL, e.g. https://ticket-mgmt-web.onrender.com — invite/reset/notification links are built from this
       - key: EMAIL_FROM
         sync: false
 

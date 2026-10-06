@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Dropdown } from "./Dropdown";
+import { IconUpload } from "./Icons";
 import type { Attachment, CommentVisibility } from "../types";
 
 function humanSize(bytes: number) {
@@ -49,7 +50,7 @@ export function Attachments({
 
   return (
     <div className="mt-8">
-      <div className="eyebrow mb-2">Attachments</div>
+      <div className="eyebrow mb-3">Attachments</div>
 
       <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
         {items?.map((a) => (
@@ -60,8 +61,9 @@ export function Attachments({
         )}
       </div>
 
-      <div className="card flex flex-wrap items-center gap-2 p-3">
+      <div className="card flex flex-wrap items-center gap-3 p-4">
         <label className="btn btn-primary btn-sm cursor-pointer">
+          <IconUpload size={15} />
           {uploadMut.isPending ? "Uploading…" : "Upload Image"}
           <input
             type="file"
@@ -121,7 +123,7 @@ function AttachmentCard({ att, onDelete }: { att: Attachment; onDelete: () => vo
 
   return (
     <div className="card overflow-hidden">
-      <div className="flex h-24 items-center justify-center bg-surface">
+      <div className="flex h-24 items-center justify-center bg-accent">
         {isImage && url ? (
           <img
             src={url}
@@ -133,21 +135,17 @@ function AttachmentCard({ att, onDelete }: { att: Attachment; onDelete: () => vo
           <span className="text-3xl">📄</span>
         )}
       </div>
-      <div className="p-2">
-        <div className="truncate text-sm font-medium" title={att.filename}>
+      <div className="p-3">
+        <div className="truncate text-sm font-medium text-fg" title={att.filename}>
           {att.filename}
         </div>
-        <div className="mb-1 flex items-center gap-1.5 text-[11px] text-muted">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-muted">
           {humanSize(att.size)}
           {att.visibility === "INTERNAL" && <span className="badge b-warn">Internal</span>}
         </div>
         <div className="flex gap-3 text-xs">
-          <button onClick={download} className="link">
-            Download
-          </button>
-          <button onClick={onDelete} className="link link-danger">
-            Delete
-          </button>
+          <button onClick={download} className="link">Download</button>
+          <button onClick={onDelete} className="link link-danger">Delete</button>
         </div>
       </div>
     </div>

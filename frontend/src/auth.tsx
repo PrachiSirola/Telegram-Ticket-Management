@@ -58,3 +58,32 @@ export const isInternalIn = (me: Me | null, orgId: string) => {
 };
 
 export const isClientIn = (me: Me | null, orgId: string) => roleInOrg(me, orgId) === "CLIENT";
+
+/** Exactly DEVELOPER (not SA/Admin, even though they're also "internal") —
+ *  used to gate the "My Work" sidebar link, which is specifically a
+ *  developer-focused view of their own assignments. */
+export const isDeveloperIn = (me: Me | null, orgId: string) => roleInOrg(me, orgId) === "DEVELOPER";
+
+/**
+ * Only users who currently hold SUPER_ADMIN, ADMIN, or CLIENT in at least
+ * one of their org memberships may create a new organisation. A user whose
+ * memberships are all DEVELOPER — or who has none at all — cannot; they
+ * need an invite instead. This mirrors the backend check in
+ * routes/orgs.ts exactly; the backend is the authoritative enforcement,
+ * this is just so the UI doesn't show an option that would be rejected.
+ */
+
+/*export const canCreateOrg = (me: Me | null) =>
+  Boolean(
+    me?.memberships.some((m) => m.role === "SUPER_ADMIN" || m.role === "ADMIN" || m.role === "CLIENT"),
+  );*/
+
+  /**
+ * Only the single fixed platform Super Admin may create a new organisation —
+ * an account-level flag (set manually, outside the app), completely separate
+ * from any per-org role. This mirrors the backend check in
+ * lib/access.ts isPlatformSuperAdmin exactly; the backend is the
+ * authoritative enforcement, this is just so the UI doesn't show an option
+ * that would be rejected.
+ */
+export const canCreateOrg = (me: Me | null) => Boolean(me?.isPlatformSuperAdmin);

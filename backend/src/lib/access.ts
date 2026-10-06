@@ -36,6 +36,18 @@ export function isClient(user: AuthUser, orgId: string): boolean {
 }
 
 /** The user's membership row in an org (for ProjectClient lookups). */
+/** The user's membership row in an org (for ProjectClient lookups). */
 export function membershipIn(user: AuthUser, orgId: string): OrgMembership | null {
   return user.memberships.find((m) => m.orgId === orgId) ?? null;
+}
+
+/**
+ * The single, fixed platform-level admin — completely separate from any
+ * per-org role. Only an account with platformRole "SUPER_ADMIN" AND
+ * platformAdminActive true may create new organisations. This is the sole
+ * gate for org creation; ordinary org SUPER_ADMIN/ADMIN/CLIENT roles no
+ * longer qualify.
+ */
+export function isPlatformSuperAdmin(user: AuthUser): boolean {
+  return user.platformRole === "SUPER_ADMIN" && user.platformAdminActive === true;
 }

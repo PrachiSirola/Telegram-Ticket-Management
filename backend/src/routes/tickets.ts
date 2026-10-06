@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireProjectAccess } from "../middleware/org.js";
-import { isAdminOrAbove, isInternal } from "../lib/access.js";
+import { isAdminOrAbove, isInternal, orgRole } from "../lib/access.js";
 import { loadTicketForUser } from "../lib/ticketAccess.js";
 import { deleteTicketFiles } from "../lib/storage.js";
 import { listNames, notify } from "../lib/notify.js";
@@ -259,6 +259,16 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
   });
 
   if (statusChanged) {
+    // Source of truth for "when was this completed" — see the model's doc
+    // comment in schema.prisma for why this exists separately from updatedAt.
+    await prisma.ticketStatusHistory.create({
+      data: {
+        ticketId: ticket.id,
+        fromStatus: ticket.status,
+        toStatus: updated.status,
+        changedById: user.id,
+      },
+    });
     await notify({
       recipientIds: [ticket.reporterId, ticket.assigneeId ?? ""].filter(Boolean),
       type: "STATUS_CHANGED",
@@ -286,11 +296,18 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
 
 // Delete: SA/Admin of the org, or the ticket's reporter. Comments, attachments
 // and notifications cascade in the DB; uploaded files are removed from disk.
+// Delete: SA/Admin of the org, or the ticket's reporter — except Developers,
+// who never get delete access even for tickets they reported themselves.
+// Comments, attachments and notifications cascade in the DB; uploaded files
+// are removed from disk.
 ticketsRouter.delete("/:id", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
   const user = req.user!;
-  if (!isAdminOrAbove(user, ticket.project.orgId) && ticket.reporterId !== user.id) {
+  const admin = isAdminOrAbove(user, ticket.project.orgId);
+  const isReporterAllowed =
+    orgRole(user, ticket.project.orgId) !== "DEVELOPER" && ticket.reporterId === user.id;
+  if (!admin && !isReporterAllowed) {
     return res.status(403).json({ error: "Only the reporter or an admin can delete" });
   }
   await prisma.ticket.delete({ where: { id: ticket.id } });

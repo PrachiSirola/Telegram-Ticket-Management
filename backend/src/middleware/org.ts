@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import type { OrgRole, Project } from "@prisma/client";
 import { prisma } from "../prisma.js";
 import { canAccessOrg, isClient, membershipIn, orgRole } from "../lib/access.js";
+import { developerCanAccessProject } from "../lib/projectAccess.js";
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -56,6 +57,10 @@ export async function requireProjectAccess(req: Request, res: Response, next: Ne
       where: { projectId_membershipId: { projectId, membershipId: membership.id } },
     });
     if (!attached) return res.status(404).json({ error: "Project not found" });
+  } else if (orgRole(req.user!, orgId) === "DEVELOPER") {
+    const membership = membershipIn(req.user!, orgId)!;
+    const has = await developerCanAccessProject(req.user!.id, membership.id, projectId);
+    if (!has) return res.status(404).json({ error: "Project not found" });
   }
   req.project = project;
   next();
