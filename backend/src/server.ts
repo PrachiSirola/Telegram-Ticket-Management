@@ -1,9 +1,17 @@
 import { createApp } from "./app.js";
 import { env } from "./env.js";
+import { getNetworkAddresses } from "./lib/network.js";
 
 const app = createApp();
-app.listen(env.port, () => {
-  console.log(`API listening on http://localhost:${env.port}`);
+const host = process.env.HOST ?? "0.0.0.0";
+
+app.listen(env.port, host, () => {
+  const networkAddresses = getNetworkAddresses();
+  const urls = [`http://localhost:${env.port}`].concat(
+    networkAddresses.map((ip) => `http://${ip}:${env.port}`),
+  );
+
+  console.log(`API listening on ${urls.join(" | ")}`);
   const emailMode = env.email.enabled ? "Brevo API" : "console fallback";
   console.log(`  Email: ${emailMode}`);
   console.log(`  Frontend URL: ${env.frontendUrl}`);

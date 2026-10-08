@@ -20,7 +20,37 @@ export function createApp() {
   // and req.protocol reflect the original HTTPS request.
   if (env.isProd) app.set("trust proxy", 1);
 
-  app.use(cors({ origin: env.frontendUrl, credentials: true }));
+  app.use(
+    cors({
+      origin(origin, callback) {
+        if (!origin) return callback(null, true);
+
+        if (env.frontendOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+
+        try {
+          const url = new URL(origin);
+          const normalizedHostname = url.hostname.replace(/^www\./, "");
+          const knownHostnames = new Set([
+            "ticketmanagement.site",
+            "localhost",
+            "127.0.0.1",
+            "[::1]",
+          ]);
+
+          if (knownHostnames.has(normalizedHostname)) {
+            return callback(null, true);
+          }
+        } catch {
+          // Ignore malformed origins and reject them below.
+        }
+
+        callback(new Error("Not allowed by CORS"));
+      },
+      credentials: true,
+    }),
+  );
   app.use(express.json());
   app.use(cookieParser());
 

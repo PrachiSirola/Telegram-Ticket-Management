@@ -21,7 +21,7 @@ export const projectsRouter = Router({ mergeParams: true });
  * ticketCount itself is the number of OPEN/IN_PROGRESS tickets (drops when
  * a ticket closes, rises again when one's created or reopened).
  */
-const OPEN_STATUSES = ["OPEN", "IN_PROGRESS"] as const;
+const OPEN_STATUSES: Array<"OPEN" | "IN_PROGRESS"> = ["OPEN", "IN_PROGRESS"];
 
 const projectSelect = {
   id: true,
