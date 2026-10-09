@@ -68,6 +68,39 @@ enum NotificationType {
   MENTIONED
 }
 
+// Who can open an attachment. INTERNAL = team only, CLIENT_VISIBLE = also the
+// project's customers, SELECTED = only the people listed in AttachmentAccess
+// (plus the uploader and Admin/Super Admin). Separate from CommentVisibility
+// because comments have no "selected members" mode.
+enum AttachmentVisibility {
+  INTERNAL
+  CLIENT_VISIBLE
+  SELECTED
+}
+
+enum ActivityType {
+  TICKET_CREATED
+  STATUS_CHANGED
+  PRIORITY_CHANGED
+  TYPE_CHANGED
+  TITLE_CHANGED
+  DESCRIPTION_CHANGED
+  DUE_DATE_CHANGED
+  ASSIGNED
+  ATTACHMENT_ADDED
+  ATTACHMENT_DELETED
+  ATTACHMENT_VISIBILITY_CHANGED
+  COMMENT_ADDED
+  COMMENT_EDITED
+  COMMENT_DELETED
+  FOLLOWER_ADDED
+  FOLLOWER_REMOVED
+  MOVED
+  ARCHIVED
+  RESTORED
+  DUPLICATED
+}
+
 enum TwoFactorMethod {
   PIN
   PASSKEY
@@ -105,6 +138,10 @@ model User {
   pinAttempts      Int              @default(0)
   pinLockedUntil   DateTime?
   ticketStatusChanges TicketStatusHistory[] @relation("TicketStatusChanges")
+  attachmentAccess    AttachmentAccess[]
+  ticketActivities    TicketActivity[]      @relation("ActivityActor")
+  ticketFollows       TicketFollower[]      @relation("FollowerUser")
+  followersAdded      TicketFollower[]      @relation("FollowerAddedBy")
 }
 
 model Organization {
@@ -302,6 +339,9 @@ model Ticket {
   reporterId  String
   dueDate     DateTime?
   estimate    Float? // hours
+  // Soft archive: archived tickets are hidden from lists, counts and My Work
+  // (customers can't open them at all) but nothing is deleted; Restore clears it.
+  archivedAt  DateTime?
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
@@ -312,9 +352,50 @@ model Ticket {
   notifications Notification[]
   attachments   Attachment[]
   statusHistory TicketStatusHistory[]
+  activity      TicketActivity[]
+  followers     TicketFollower[]
 
   @@index([projectId, status])
   @@index([assigneeId])
+  @@index([archivedAt])
+}
+
+// Append-only audit trail of everything important that happens to a ticket.
+// There is deliberately NO update/delete API for it, and a database trigger
+// (see the ticket_collaboration migration) rejects UPDATE and direct DELETE
+// even from raw SQL — rows only disappear when their ticket is deleted
+// (FK cascade). `internalOnly` rows are hidden from customers.
+model TicketActivity {
+  id           String       @id @default(cuid())
+  ticketId     String
+  actorId      String
+  type         ActivityType
+  field        String? // e.g. "status", "priority" (for display)
+  fromValue    String? // human-readable snapshot (names, not ids)
+  toValue      String?
+  meta         Json? // extra context: filename, projectIds, commentId...
+  internalOnly Boolean      @default(false)
+  createdAt    DateTime     @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actor  User   @relation("ActivityActor", fields: [actorId], references: [id])
+
+  @@index([ticketId, createdAt])
+}
+
+model TicketFollower {
+  id        String   @id @default(cuid())
+  ticketId  String
+  userId    String
+  addedById String
+  createdAt DateTime @default(now())
+
+  ticket  Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user    User   @relation("FollowerUser", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User   @relation("FollowerAddedBy", fields: [addedById], references: [id], onDelete: Cascade)
+
+  @@unique([ticketId, userId])
+  @@index([userId])
 }
 
 // Records every status transition a ticket goes through. Written once per
@@ -349,6 +430,7 @@ model Comment {
   parentId   String?
   body       String
   visibility CommentVisibility @default(INTERNAL)
+  editedAt   DateTime? // set when the author edits the comment
   createdAt  DateTime          @default(now())
 
   ticket      Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
@@ -369,15 +451,30 @@ model Attachment {
   mimeType   String
   size       Int
   storageKey String // relative path on disk (or object key once on S3)
-  visibility CommentVisibility @default(CLIENT_VISIBLE)
-  createdAt  DateTime          @default(now())
+  visibility AttachmentVisibility @default(CLIENT_VISIBLE)
+  createdAt  DateTime             @default(now())
 
-  ticket   Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  comment  Comment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
-  uploader User     @relation(fields: [uploaderId], references: [id])
+  ticket   Ticket             @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  comment  Comment?           @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  uploader User               @relation(fields: [uploaderId], references: [id])
+  access   AttachmentAccess[]
 
   @@index([ticketId])
   @@index([commentId])
+}
+
+// Who a SELECTED-visibility attachment is shared with.
+model AttachmentAccess {
+  id           String   @id @default(cuid())
+  attachmentId String
+  userId       String
+  createdAt    DateTime @default(now())
+
+  attachment Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([attachmentId, userId])
+  @@index([userId])
 }
 
 model Notification {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -7,15 +7,15 @@ import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Pagination } from "../components/Pagination";
+import { TablePagination } from "../components/TablePagination";
+import { useListParams } from "../lib/useListParams";
 import { IconFolder, IconPlus, IconArrowRight, IconTrash, IconSearch } from "../components/Icons";
 import type { Project, ProjectCounts, ProjectStatusFilter } from "../types";
 import { Dropdown } from "../components/Dropdown";
 
-
-/* ── Workspace illustration (warm outline art) ── */
 function HeroIllustration() {
-  const S = "#F2D9B8";          // warm light tan for strokes
-  const F = "#F2D9B8";          // fill accent
+  const S = "#F2D9B8";          
+  const F = "#F2D9B8";        
   return (
     <svg
       viewBox="0 0 520 220"
@@ -105,12 +105,36 @@ function HeroIllustration() {
 export default function Dashboard() {
   const { me } = useAuth();
   const { activeOrgId } = useOrg();
-  const [filter, setFilter] = useState<"assigned" | "reported">("assigned");
-  const { data: tickets, isLoading } = useQuery({
-    queryKey: ["myTickets", activeOrgId, filter],
-    queryFn: () => api.myTickets(activeOrgId, filter),
-    enabled: !!activeOrgId,
+  const { filters, page, pageSize, setFilter: setListFilter, setPage, setPageSize } = useListParams({
+    pageKey: "tpage",
+    sizeKey: "tsize",
+    filters: { tview: ["assigned", "reported"] },
   });
+  const filter = (filters.tview || "assigned") as "assigned" | "reported";
+  const listTop = useRef<HTMLDivElement>(null);
+  const {
+    data: paged,
+    isLoading,
+    isFetching,
+    isPlaceholderData,
+    isError,
+    refetch,
+  } = useQuery({
+    queryKey: ["myTickets", activeOrgId, filter, page, pageSize],
+    queryFn: () => api.myTicketsPaged(activeOrgId, filter, { page, pageSize }),
+    enabled: !!activeOrgId,
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey[1] === activeOrgId && prevQuery?.queryKey[2] === filter ? prev : undefined,
+  });
+  const tickets = paged?.items;
+  useEffect(() => {
+    if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
+  }, [paged, isPlaceholderData, page, setPage]);
+
+  function goToPage(next: number) {
+    setPage(next);
+    listTop.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   const admin = isAdminOrAboveIn(me, activeOrgId);
 
@@ -150,7 +174,7 @@ export default function Dashboard() {
             {(["assigned", "reported"] as const).map((f) => (
               <button
                 key={f}
-                onClick={() => setFilter(f)}
+                onClick={() => setListFilter("tview", f === "assigned" ? "" : f)}
                 className={`px-5 py-2 font-semibold transition-all ${
                   filter === f ? "bg-primary text-white" : "text-fg-soft hover:bg-accent hover:text-fg"
                 }`}
@@ -160,7 +184,21 @@ export default function Dashboard() {
             ))}
           </div>
         </div>
-        <div className="card divide-line overflow-hidden">
+        <div ref={listTop} className="scroll-mt-4" />
+        <div
+          className={`card divide-line overflow-hidden transition-opacity ${
+            isFetching && !isLoading ? "opacity-60" : ""
+          }`}
+          aria-busy={isFetching}
+        >
+          {isError && !paged && (
+            <div className="p-10 text-center text-sm">
+              <p className="text-danger">Couldn't load tickets.</p>
+              <button className="btn btn-secondary btn-sm mt-3" onClick={() => refetch()}>
+                Try again
+              </button>
+            </div>
+          )}
           {isLoading && (
             <div className="space-y-3 p-5">
               {[1, 2, 3].map((i) => <div key={i} className="h-12 rounded-lg bg-accent pulse" />)}
@@ -177,6 +215,16 @@ export default function Dashboard() {
           )}
           {tickets?.map((t) => <TicketRow key={t.id} ticket={t} showProject />)}
         </div>
+        {paged && (
+          <TablePagination
+            page={paged.page}
+            pageSize={paged.pageSize}
+            total={paged.total}
+            busy={isFetching}
+            onPageChange={goToPage}
+            onPageSizeChange={setPageSize}
+          />
+        )}
       </section>
     </div>
   );
@@ -196,8 +244,8 @@ const PROJECT_COLORS = [
   { bg: "#f0ece8", icon: "#7a5030", border: "#d8cec2" },
 ];
 
-const PROJECTS_PAGE_SIZE_OPTIONS = [9, 18, 30, 60, 100];
-const DEFAULT_PROJECTS_PAGE_SIZE = 18; // 3 columns × 6 rows
+const PROJECTS_PAGE_SIZE_OPTIONS = [10, 25, 50, 100]; 
+const DEFAULT_PROJECTS_PAGE_SIZE = 25;
 
 const PROJECT_TABS: { key: ProjectStatusFilter; label: string; countKey: keyof ProjectCounts }[] = [
   { key: undefined, label: "All", countKey: "all" },
@@ -214,23 +262,17 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
   const [delProject, setDelProject] = useState<Project | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PROJECTS_PAGE_SIZE);
-  const [tab, setTab] = useState<ProjectStatusFilter>(undefined); // undefined = "All"
+  const [tab, setTab] = useState<ProjectStatusFilter>(undefined); 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
-  // Debounce the search box so we're not firing a request on every keystroke.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
     return () => clearTimeout(t);
   }, [search]);
-
-  // Any change to what's being filtered/searched/sized always lands back on page 1.
   useEffect(() => {
     setPage(1);
   }, [tab, pageSize, debouncedSearch]);
-
-  // Live tab counts (Active/Closed are computed server-side from ticket
-  // state, not stored — see backend/src/routes/projects.ts statusWhere()).
   const { data: counts } = useQuery({
     queryKey: ["projects", orgId, "counts"],
     queryFn: () => api.projectCounts(orgId),
@@ -254,9 +296,6 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
       setName("");
       setDescription("");
       setShowForm(false);
-      // A fresh project has zero tickets, so it can't match Active/Closed —
-      // jump back to All so it doesn't look like it disappeared. Also clear
-      // any active search so the new project is guaranteed to be visible.
       setTab(undefined);
       setSearch("");
       qc.invalidateQueries({ queryKey: ["projects", orgId] });
@@ -269,9 +308,6 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
       qc.invalidateQueries({ queryKey: ["projects", orgId] });
     },
   });
-
-  // If deleting the last project on a page empties it (and it's not page 1),
-  // step back a page rather than showing a stranded empty page.
   useEffect(() => {
     if (paged && paged.items.length === 0 && page > 1) setPage(page - 1);
   }, [paged, page]);

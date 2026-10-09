@@ -51,3 +51,17 @@ export function membershipIn(user: AuthUser, orgId: string): OrgMembership | nul
 export function isPlatformSuperAdmin(user: AuthUser): boolean {
   return user.platformRole === "SUPER_ADMIN" && user.platformAdminActive === true;
 }
+
+/**
+ * Who may create a new organisation: anyone who is the (active) Super Admin of
+ * at least one organisation. Admins, Developers and Clients never qualify.
+ * This is the single gate used by both the UI hint (mirrored in the frontend's
+ * canCreateOrg) and the backend routes/services, so it can't drift.
+ *
+ * History: this used to be the account-level platform flag above (set only by
+ * a CLI script), which silently removed the option from every ordinary org
+ * Super Admin — that is why "New organisation" disappeared.
+ */
+export function canCreateOrganisation(user: Pick<AuthUser, "memberships">): boolean {
+  return user.memberships.some((m) => m.role === "SUPER_ADMIN" && !m.disabled);
+}
