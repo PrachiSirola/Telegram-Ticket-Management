@@ -1,3 +1,4 @@
+import { q, toast } from "../lib/toast";
 import { useEffect, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -6,6 +7,20 @@ import { canCreateOrg, isAdminOrAboveIn, isOrgSA, useAuth } from "../auth";
 import { forgetActiveOrg, useOrg } from "../org";
 import { Modal } from "../components/Modal";
 import { Dropdown } from "../components/Dropdown";
+
+/** IANA timezone names for the picker (always includes the current value). */
+function timezoneOptions(current: string) {
+  const all: string[] =
+    (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.("timeZone") ?? [];
+  const names = new Set(all.length ? all : ["Asia/Kolkata", "UTC"]);
+  names.add("Asia/Kolkata");
+  if (current) names.add(current);
+  return [...names].sort().map((tz) => ({
+    value: tz,
+    // "Asia / Kolkata": spaces around the slash so the picker's word-prefix search finds "Kolkata".
+    label: tz.replace(/\//g, " / ").replace(/_/g, " "),
+  }));
+}
 
 export default function OrgSettings() {
   const { me } = useAuth();
@@ -31,17 +46,18 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
   });
 
   const [name, setName] = useState("");
+  const [timezone, setTimezone] = useState("Asia/Kolkata");
   const [botToken, setBotToken] = useState("");
   const [chatId, setChatId] = useState("");
   const [transferTo, setTransferTo] = useState("");
   const [confirmTransfer, setConfirmTransfer] = useState(false);
   const [confirmDeleteText, setConfirmDeleteText] = useState("");
   const [showDelete, setShowDelete] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (settings) {
       setName(settings.name);
+      setTimezone(settings.timezone);
       setChatId(settings.telegramChatId ?? "");
       setBotToken("");
     }
@@ -50,38 +66,45 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
   const save = useMutation({
     mutationFn: () =>
       api.updateOrg(orgId, {
-        ...(sa ? { name } : {}),
+        ...(sa ? { name, timezone } : {}),
         ...(botToken !== "" || !settings?.telegramConfigured ? { telegramBotToken: botToken } : {}),
         telegramChatId: chatId,
       }),
+    meta: { errorTitle: "Couldn't save the settings" },
     onSuccess: async () => {
-      setMsg({ ok: true, text: "Settings saved." });
+      // Describe what actually changed, with before -> after for names/timezone.
+      const parts: string[] = [];
+      if (sa && settings && name.trim() !== settings.name) parts.push(`name changed from ${q(settings.name)} to ${q(name.trim())}`);
+      if (sa && settings && timezone !== settings.timezone) parts.push(`timezone changed from ${settings.timezone} to ${timezone}`);
+      if (botToken !== "") parts.push("Telegram bot token updated");
+      if (settings && chatId !== (settings.telegramChatId ?? "")) parts.push(chatId ? `Telegram chat ID set to ${chatId}` : "Telegram chat ID cleared");
+      if (parts.length) toast.success(`Organisation settings saved: ${parts.join("; ")}.`);
+      else toast.info("No changes to save.");
       await qc.invalidateQueries({ queryKey: ["orgSettings", orgId] });
       await qc.invalidateQueries({ queryKey: ["orgs"] });
       await refresh();
     },
-    onError: (e: any) =>
-      setMsg({ ok: false, text: e?.response?.data?.error ?? "Couldn't save settings." }),
   });
 
   const transfer = useMutation({
     mutationFn: () => api.transferOwnership(orgId, transferTo),
+    meta: { errorTitle: "Couldn't transfer ownership" },
     onSuccess: async () => {
+      toast.success(`Ownership of ${q(settings?.name ?? name)} was transferred to ${transferTarget?.name ?? "the selected admin"}. You are now an Admin.`);
       setConfirmTransfer(false);
       await refresh();
       await qc.invalidateQueries({ queryKey: ["orgs"] });
       await qc.invalidateQueries({ queryKey: ["orgMembers", orgId] });
       navigate("/");
     },
-    onError: (e: any) => {
-      setConfirmTransfer(false);
-      setMsg({ ok: false, text: e?.response?.data?.error ?? "Transfer failed." });
-    },
+    onError: () => setConfirmTransfer(false), // the error toast comes from the global handler
   });
 
   const del = useMutation({
     mutationFn: () => api.deleteOrg(orgId),
+    meta: { errorTitle: "Couldn't delete the organisation" },
     onSuccess: async () => {
+      toast.success(`Organisation ${q(settings?.name ?? name)} and all of its data were permanently deleted.`);
       forgetActiveOrg(me?.id);
       await qc.invalidateQueries({ queryKey: ["orgs"] });
       await refresh();
@@ -108,6 +131,21 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
               <input className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
             </div>
           )}
+          {sa && (
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-fg-soft">Timezone</label>
+              <Dropdown
+                searchable
+                searchPlaceholder="Search timezones…"
+                value={timezone}
+                onChange={setTimezone}
+                options={timezoneOptions(timezone)}
+              />
+              <p className="mt-1 text-xs text-fg-soft">
+                Decides what "today" means for due-date views, such as a project's default Today list.
+              </p>
+            </div>
+          )}
 
           <div className={sa ? "eyebrow mt-2" : "eyebrow"}>Telegram notifications</div>
           <p className="-mt-2 text-xs text-fg-soft">
@@ -128,9 +166,6 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
             <button className="btn btn-primary" disabled={(sa && !name.trim()) || save.isPending} onClick={() => save.mutate()}>
               {save.isPending ? "Saving…" : "Save settings"}
             </button>
-            {msg && (
-              <span className={`text-sm ${msg.ok ? "text-ok" : "text-danger"}`}>{msg.text}</span>
-            )}
           </div>
         </div>
       </div>

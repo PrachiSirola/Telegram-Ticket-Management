@@ -7,11 +7,11 @@ import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireOrgRole } from "../middleware/org.js";
 import { isOrgSA } from "../lib/access.js";
 import { isAllowedEmailDomain } from "../lib/password.js";
-import { inviteEmail, sendEmail } from "../lib/email.js";
+import { inviteEmail, sendEmail, type SendResult } from "../lib/email.js";
 import type { Invite } from "@prisma/client";
 
 /** Email the invite link to the invitee. Never throws (sendEmail swallows). */
-async function sendInviteEmail(invite: Invite, inviterName: string) {
+async function sendInviteEmail(invite: Invite, inviterName: string): Promise<SendResult> {
   const [org, projects] = await Promise.all([
     prisma.organization.findUniqueOrThrow({
       where: { id: invite.orgId },
@@ -31,7 +31,7 @@ async function sendInviteEmail(invite: Invite, inviterName: string) {
     projectNames: projects.map((p) => p.name),
     inviteUrl: `${env.frontendUrl}/accept-invite?token=${invite.token}`,
   });
-  await sendEmail({ ...mail, to: invite.email });
+  return sendEmail({ ...mail, to: invite.email });
 }
 
 // mergeParams so :orgId from the parent mount is available.
@@ -127,6 +127,155 @@ invitesRouter.post(
       role: invite.role,
       status: invite.status,
       inviteUrl: `${env.frontendUrl}/accept-invite?token=${invite.token}`,
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Bulk invite. One role per batch; each recipient has their own project list
+// (the UI fills the same list for everyone in "same projects" mode). Every
+// recipient gets their own Invite row + unique token, so acceptance, expiry and
+// revoke work exactly like single invites. Per-recipient problems never abort
+// the batch — the response reports each address.
+// ---------------------------------------------------------------------------
+export const BULK_INVITE_MAX = 50;
+
+const bulkSchema = z.object({
+  role: z.enum(["ADMIN", "DEVELOPER", "CLIENT"]),
+  items: z
+    .array(z.object({ email: z.string(), projectIds: z.array(z.string()).optional() }))
+    .min(1, "Add at least one email")
+    .max(BULK_INVITE_MAX, `You can invite up to ${BULK_INVITE_MAX} people at a time`),
+});
+
+type BulkStatus = "invited" | "skipped" | "invalid";
+interface BulkResult {
+  email: string;
+  status: BulkStatus;
+  /** Why it was skipped / rejected (or the email error when the mail didn't go out). */
+  reason?: string;
+  /** invited only: did the email actually go out? The invite exists either way. */
+  emailSent?: boolean;
+  inviteUrl?: string;
+}
+
+invitesRouter.post(
+  "/bulk",
+  requireAuth,
+  requireOrgAccess,
+  requireOrgRole("SUPER_ADMIN", "ADMIN"),
+  async (req, res) => {
+    const parsed = bulkSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      return res.status(400).json({ error: first?.message ?? "Invalid request" });
+    }
+    const orgId = req.params.orgId;
+    const { role, items } = parsed.data;
+
+    // Same rule as single invite: only the org's Super Admin may invite Admins.
+    if (role === "ADMIN" && !isOrgSA(req.user!, orgId)) {
+      return res.status(403).json({ error: "Only the Super Admin can invite Admins" });
+    }
+
+    // Normalise, then split into rows we'll try vs. rows we can already reject.
+    const results = new Map<number, BulkResult>();
+    const seen = new Set<string>();
+    const candidates: { idx: number; email: string; projectIds: string[] }[] = [];
+    items.forEach((it, idx) => {
+      const email = it.email.trim().toLowerCase();
+      if (!z.string().email().safeParse(email).success || !isAllowedEmailDomain(email)) {
+        results.set(idx, { email: it.email.trim(), status: "invalid", reason: "Not a valid email address" });
+      } else if (seen.has(email)) {
+        results.set(idx, { email, status: "skipped", reason: "Duplicate in this list" });
+      } else {
+        seen.add(email);
+        candidates.push({ idx, email, projectIds: [...new Set(it.projectIds ?? [])] });
+      }
+    });
+
+    const emails = candidates.map((c) => c.email);
+    const [users, pendingInvites] = await Promise.all([
+      prisma.user.findMany({
+        where: { email: { in: emails } },
+        select: { id: true, email: true, memberships: { where: { orgId }, select: { id: true } } },
+      }),
+      prisma.invite.findMany({
+        where: { orgId, email: { in: emails }, status: "PENDING", expiresAt: { gt: new Date() } },
+        select: { email: true },
+      }),
+    ]);
+    const memberEmails = new Set(users.filter((u) => u.memberships.length > 0).map((u) => u.email.toLowerCase()));
+    const pendingEmails = new Set(pendingInvites.map((i) => i.email.toLowerCase()));
+
+    // Validate every referenced project belongs to THIS org in one query.
+    const wantedProjects = [...new Set(candidates.flatMap((c) => (role === "ADMIN" ? [] : c.projectIds)))];
+    const validProjects = new Set(
+      wantedProjects.length
+        ? (await prisma.project.findMany({ where: { id: { in: wantedProjects }, orgId }, select: { id: true } })).map(
+            (p) => p.id,
+          )
+        : [],
+    );
+
+    const inviterName = req.user!.name;
+    for (const c of candidates) {
+      if (memberEmails.has(c.email)) {
+        results.set(c.idx, { email: c.email, status: "skipped", reason: "Already a member of this organisation" });
+        continue;
+      }
+      if (pendingEmails.has(c.email)) {
+        results.set(c.idx, { email: c.email, status: "skipped", reason: "Already has a pending invite" });
+        continue;
+      }
+      const projectIds = role === "ADMIN" ? [] : c.projectIds;
+      if (role === "CLIENT" && projectIds.length === 0) {
+        results.set(c.idx, { email: c.email, status: "invalid", reason: "Clients need at least one project" });
+        continue;
+      }
+      if (projectIds.some((id) => !validProjects.has(id))) {
+        results.set(c.idx, { email: c.email, status: "invalid", reason: "One or more projects don't exist in this org" });
+        continue;
+      }
+
+      try {
+        const invite = await prisma.invite.create({
+          data: {
+            email: c.email,
+            role,
+            projectIds,
+            orgId,
+            token: randomUUID(),
+            invitedById: req.user!.id,
+            expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days, same as single invite
+          },
+        });
+        // Sequential on purpose: gentle on the mail provider's rate limits, and a
+        // mail failure keeps the invite (link still shown) instead of losing it.
+        const sent = await sendInviteEmail(invite, inviterName);
+        results.set(c.idx, {
+          email: c.email,
+          status: "invited",
+          emailSent: sent.ok,
+          ...(sent.ok ? {} : { reason: sent.error ?? "Email could not be sent" }),
+          inviteUrl: `${env.frontendUrl}/accept-invite?token=${invite.token}`,
+        });
+      } catch (e) {
+        console.error("[invites/bulk] could not create invite for", c.email, e);
+        results.set(c.idx, { email: c.email, status: "invalid", reason: "Could not create the invite" });
+      }
+    }
+
+    const ordered = items.map((_, i) => results.get(i)!);
+    res.status(200).json({
+      results: ordered,
+      summary: {
+        total: ordered.length,
+        invited: ordered.filter((r) => r.status === "invited").length,
+        emailFailed: ordered.filter((r) => r.status === "invited" && !r.emailSent).length,
+        skipped: ordered.filter((r) => r.status === "skipped").length,
+        invalid: ordered.filter((r) => r.status === "invalid").length,
+      },
     });
   },
 );

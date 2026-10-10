@@ -5,17 +5,35 @@ import { api } from "../lib/api";
 import { isAdminOrAboveIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
-import { ConfirmModal } from "../components/ConfirmModal";
+import { MenuButton } from "../components/ActionMenu";
+import { q, toast } from "../lib/toast";
+import {
+  ArchiveProjectModal,
+  DeleteProjectModal,
+  EditProjectModal,
+  RestoreProjectModal,
+} from "../components/ProjectModals";
 import { Pagination } from "../components/Pagination";
 import { TablePagination } from "../components/TablePagination";
 import { useListParams } from "../lib/useListParams";
-import { IconFolder, IconPlus, IconArrowRight, IconTrash, IconSearch } from "../components/Icons";
+import {
+  IconFolder,
+  IconPlus,
+  IconArrowRight,
+  IconTrash,
+  IconSearch,
+  IconMoreHorizontal,
+  IconEdit,
+  IconArchive,
+} from "../components/Icons";
 import type { Project, ProjectCounts, ProjectStatusFilter } from "../types";
 import { Dropdown } from "../components/Dropdown";
 
+
+/* ── Workspace illustration (warm outline art) ── */
 function HeroIllustration() {
-  const S = "#F2D9B8";          
-  const F = "#F2D9B8";        
+  const S = "#F2D9B8";          // warm light tan for strokes
+  const F = "#F2D9B8";          // fill accent
   return (
     <svg
       viewBox="0 0 520 220"
@@ -105,6 +123,9 @@ function HeroIllustration() {
 export default function Dashboard() {
   const { me } = useAuth();
   const { activeOrgId } = useOrg();
+  // "My Tickets" paging lives in the URL under its own keys (tpage / tsize /
+  // tview) so it can't collide with anything else on the Dashboard. Switching
+  // Assigned/Reported or the page size goes back to page 1.
   const { filters, page, pageSize, setFilter: setListFilter, setPage, setPageSize } = useListParams({
     pageKey: "tpage",
     sizeKey: "tsize",
@@ -127,6 +148,10 @@ export default function Dashboard() {
       prevQuery?.queryKey[1] === activeOrgId && prevQuery?.queryKey[2] === filter ? prev : undefined,
   });
   const tickets = paged?.items;
+
+  // Server clamps an out-of-range page to the last page; mirror it into the URL.
+  // Skip while `paged` is only placeholder data from the previous page —
+  // that would look like a clamp and bounce the user straight back.
   useEffect(() => {
     if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
   }, [paged, isPlaceholderData, page, setPage]);
@@ -244,14 +269,18 @@ const PROJECT_COLORS = [
   { bg: "#f0ece8", icon: "#7a5030", border: "#d8cec2" },
 ];
 
-const PROJECTS_PAGE_SIZE_OPTIONS = [10, 25, 50, 100]; 
+const PROJECTS_PAGE_SIZE_OPTIONS = [10, 25, 50, 100]; // same choices as the ticket lists
 const DEFAULT_PROJECTS_PAGE_SIZE = 25;
 
-const PROJECT_TABS: { key: ProjectStatusFilter; label: string; countKey: keyof ProjectCounts }[] = [
+// "Current" (New + Active) is the default view; "All" is every non-archived
+// project. "Archived" is only offered to admins (the server enforces it too).
+const PROJECT_TABS: { key: ProjectStatusFilter; label: string; countKey: keyof ProjectCounts; adminOnly?: boolean }[] = [
+  { key: "current", label: "Current", countKey: "current" },
   { key: undefined, label: "All", countKey: "all" },
   { key: "new", label: "New", countKey: "new" },
   { key: "active", label: "Active", countKey: "active" },
   { key: "closed", label: "Closed", countKey: "closed" },
+  { key: "archived", label: "Archived", countKey: "archived", adminOnly: true },
 ];
 
 function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boolean }) {
@@ -259,20 +288,29 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [editProject, setEditProject] = useState<Project | null>(null);
+  const [archiveProject, setArchiveProject] = useState<Project | null>(null);
+  const [restoreProject, setRestoreProject] = useState<Project | null>(null);
   const [delProject, setDelProject] = useState<Project | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PROJECTS_PAGE_SIZE);
-  const [tab, setTab] = useState<ProjectStatusFilter>(undefined); 
+  const [tab, setTab] = useState<ProjectStatusFilter>("current"); // default view: New + Active
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
+  // Debounce the search box so we're not firing a request on every keystroke.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
     return () => clearTimeout(t);
   }, [search]);
+
+  // Any change to what's being filtered/searched/sized always lands back on page 1.
   useEffect(() => {
     setPage(1);
   }, [tab, pageSize, debouncedSearch]);
+
+  // Live tab counts (Active/Closed are computed server-side from ticket
+  // state, not stored — see backend/src/routes/projects.ts statusWhere()).
   const { data: counts } = useQuery({
     queryKey: ["projects", orgId, "counts"],
     queryFn: () => api.projectCounts(orgId),
@@ -292,22 +330,29 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
 
   const create = useMutation({
     mutationFn: () => api.createProject(orgId, { name, description: description || undefined }),
-    onSuccess: () => {
+    meta: { errorTitle: "Couldn't create the project" },
+    onSuccess: (p) => {
+      toast.success(`Project ${q(p.name)} has been created.`);
       setName("");
       setDescription("");
       setShowForm(false);
-      setTab(undefined);
+      // A fresh project has zero tickets ("New"), which the default Current
+      // tab includes — jump back to it so the project doesn't look like it
+      // disappeared. Also clear any active search so it is guaranteed visible.
+      setTab("current");
       setSearch("");
       qc.invalidateQueries({ queryKey: ["projects", orgId] });
     },
   });
-  const del = useMutation({
-    mutationFn: (projectId: string) => api.deleteProject(orgId, projectId),
-    onSuccess: () => {
-      setDelProject(null);
-      qc.invalidateQueries({ queryKey: ["projects", orgId] });
-    },
-  });
+  // Edit / archive / restore / delete all just refresh every project query
+  // (lists, tab counts, the switcher) so the UI reflects the change at once.
+  // The success toast itself comes from the modal that did the work.
+  function changed() {
+    qc.invalidateQueries({ queryKey: ["projects", orgId] });
+  }
+
+  // If deleting the last project on a page empties it (and it's not page 1),
+  // step back a page rather than showing a stranded empty page.
   useEffect(() => {
     if (paged && paged.items.length === 0 && page > 1) setPage(page - 1);
   }, [paged, page]);
@@ -326,7 +371,7 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
       {/* Status tabs (left) + search (right), same row */}
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div className="inline-flex items-center gap-1 rounded-full border border-card-border bg-white p-1">
-          {PROJECT_TABS.map((t) => {
+          {PROJECT_TABS.filter((t) => !t.adminOnly || canManage).map((t) => {
             const active = t.key === tab;
             const count = counts?.[t.countKey];
             return (
@@ -380,30 +425,53 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
                 ? `No projects match "${debouncedSearch}".`
                 : tab === undefined
                   ? `No projects yet${canManage ? " — create one to get started." : "."}`
-                  : `No ${tab} projects right now.`}
+                  : tab === "current"
+                    ? `No new or active projects right now.${canManage ? " Create one, or check the All tab." : ""}`
+                    : tab === "archived"
+                      ? "No archived projects."
+                      : `No ${tab} projects right now.`}
             </p>
           </div>
         )}
         {projects?.map((p, i) => {
           const c = PROJECT_COLORS[i % PROJECT_COLORS.length];
           return (
-            <div key={p.id} className="group relative overflow-hidden rounded-2xl border bg-white transition-all duration-300 hover:-translate-y-0.5 hover:shadow-elevated" style={{ borderColor: c.border }}>
-              <div className="h-1" style={{ background: c.icon }} />
+            <div key={p.id} data-testid="project-card" className={`group relative hover:z-30 focus-within:z-30 rounded-2xl border bg-white transition-all duration-300 hover:-translate-y-0.5 hover:shadow-elevated ${p.archivedAt ? "opacity-80" : ""}`} style={{ borderColor: c.border }}>
+              <div className="h-1 rounded-t-2xl" style={{ background: c.icon }} />
               <Link to={`/projects/${p.id}`} className="block p-5">
                 <div className="flex items-start gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl" style={{ background: c.bg }}><IconFolder size={18} style={{ color: c.icon }} /></div>
-                  <div className="min-w-0 flex-1">
+                  <div className={`min-w-0 flex-1 ${canManage ? "pr-8" : ""}`}>
                     <h3 className="text-[15px] font-bold tracking-tight text-fg transition-colors group-hover:text-primary" style={{ fontFamily: "var(--font-display)" }}>{p.name}</h3>
                     <p className="mt-0.5 text-sm text-fg-soft line-clamp-2">{p.description || "No description."}</p>
                   </div>
                 </div>
                 <div className="mt-3.5 flex items-center justify-between">
-                  <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-bold" style={{ background: c.bg, color: c.icon }}>{p.ticketCount} {p.ticketCount === 1 ? "Ticket" : "Tickets"}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-bold" style={{ background: c.bg, color: c.icon }}>{p.ticketCount} {p.ticketCount === 1 ? "Ticket" : "Tickets"}</span>
+                    {p.archivedAt && <span className="badge b-outline-muted">Archived</span>}
+                  </span>
                   <span className="flex items-center gap-1 text-xs font-semibold text-primary opacity-0 transition-all group-hover:opacity-100">Open <IconArrowRight size={13} /></span>
                 </div>
               </Link>
               {canManage && (
-                <button className="absolute right-3 top-4 flex h-7 w-7 items-center justify-center rounded-lg text-muted opacity-0 transition-all hover:bg-danger/10 hover:text-danger group-hover:opacity-100" onClick={() => setDelProject(p)} title="Delete project"><IconTrash size={14} /></button>
+                <div className="absolute right-2.5 top-4">
+                  <MenuButton
+                    label={`Actions for ${p.name}`}
+                    testId="project-menu"
+                    iconOnly
+                    align="right"
+                    width="w-48"
+                    variant="btn-secondary !px-1.5 !py-1"
+                    icon={<IconMoreHorizontal size={16} />}
+                    items={[
+                      { key: "edit-project", label: "Edit project", icon: <IconEdit size={15} />, hidden: !!p.archivedAt, onSelect: () => setEditProject(p) },
+                      { key: "archive-project", label: "Archive", icon: <IconArchive size={15} />, hidden: !!p.archivedAt, onSelect: () => setArchiveProject(p) },
+                      { key: "restore-project", label: "Restore from archive", icon: <IconArchive size={15} />, hidden: !p.archivedAt, onSelect: () => setRestoreProject(p) },
+                      { key: "delete-project", label: "Delete…", icon: <IconTrash size={15} />, danger: true, separator: true, onSelect: () => setDelProject(p) },
+                    ]}
+                  />
+                </div>
               )}
             </div>
           );
@@ -429,7 +497,10 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
         </div>
       )}
 
-      <ConfirmModal open={!!delProject} title="Delete project?" message={<>This permanently deletes <span className="font-medium">"{delProject?.name}"</span> and all of its tickets, comments, and attachments.</>} pending={del.isPending} onConfirm={() => del.mutate(delProject!.id)} onClose={() => setDelProject(null)} />
+      <EditProjectModal orgId={orgId} project={editProject} onClose={() => setEditProject(null)} onSaved={() => { setEditProject(null); changed(); }} />
+      <ArchiveProjectModal orgId={orgId} project={archiveProject} onClose={() => setArchiveProject(null)} onDone={() => { setArchiveProject(null); changed(); }} />
+      <RestoreProjectModal orgId={orgId} project={restoreProject} onClose={() => setRestoreProject(null)} onDone={() => { setRestoreProject(null); changed(); }} />
+      <DeleteProjectModal orgId={orgId} project={delProject} onClose={() => setDelProject(null)} onDone={() => { setDelProject(null); changed(); }} />
     </section>
   );
 }

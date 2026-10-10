@@ -27,10 +27,12 @@ function serializeOrg(org: {
   name: string;
   telegramBotToken: string | null;
   telegramChatId: string | null;
+  timezone: string;
 }) {
   return {
     id: org.id,
     name: org.name,
+    timezone: org.timezone,
     telegramBotToken: mask(org.telegramBotToken),
     telegramChatId: org.telegramChatId,
     telegramConfigured: Boolean(org.telegramBotToken && org.telegramChatId),
@@ -43,10 +45,10 @@ orgsRouter.get("/", requireAuth, async (req, res) => {
   const orgs = await prisma.organization.findMany({
     where: { id: { in: user.memberships.map((m) => m.orgId) } },
     orderBy: { name: "asc" },
-    select: { id: true, name: true },
+    select: { id: true, name: true, timezone: true },
   });
   res.json(
-    orgs.map((o) => ({ id: o.id, name: o.name, role: orgRole(user, o.id) })),
+    orgs.map((o) => ({ id: o.id, name: o.name, timezone: o.timezone, role: orgRole(user, o.id) })),
   );
 });
 
@@ -93,8 +95,17 @@ orgsRouter.post("/create/verify", requireAuth, async (req, res) => {
 
 // Org settings (name, Telegram). Super Admin only. Bot token is write-only:
 // responses carry a masked value; sending an empty string clears it.
+const isValidTimeZone = (tz: string) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+};
 const updateSchema = z.object({
   name: z.string().min(1).max(100).optional(),
+  timezone: z.string().max(64).refine(isValidTimeZone, "Unknown timezone").optional(),
   telegramBotToken: z.string().max(200).optional(),
   telegramChatId: z.string().max(100).optional(),
 });
@@ -124,10 +135,15 @@ orgsRouter.patch(
     if (b.name !== undefined && !isOrgSA(req.user!, req.params.orgId)) {
       return res.status(403).json({ error: "Only the Super Admin can rename the organisation" });
     }
+    // "Today" changes for everyone in the org, so the timezone is SA-only like renaming.
+    if (b.timezone !== undefined && !isOrgSA(req.user!, req.params.orgId)) {
+      return res.status(403).json({ error: "Only the Super Admin can change the organisation timezone" });
+    }
     const org = await prisma.organization.update({
       where: { id: req.params.orgId },
       data: {
         ...(b.name !== undefined ? { name: b.name.trim() } : {}),
+        ...(b.timezone !== undefined ? { timezone: b.timezone } : {}),
         ...(b.telegramBotToken !== undefined
           ? { telegramBotToken: b.telegramBotToken || null }
           : {}),
@@ -308,10 +324,11 @@ orgsRouter.get(
 
     const projects =
       membership.role === "SUPER_ADMIN" || membership.role === "ADMIN"
-        ? await prisma.project.findMany({ where: { orgId }, select: { id: true, name: true }, orderBy: { name: "asc" } })
+        ? await prisma.project.findMany({ where: { orgId, archivedAt: null }, select: { id: true, name: true }, orderBy: { name: "asc" } })
         : await prisma.project.findMany({
             where: {
               orgId,
+              archivedAt: null, // archived projects are hidden everywhere except the Archived tab
               OR: [
                 { developers: { some: { membershipId: membership.id } } },
                 { clients: { some: { membershipId: membership.id } } },
@@ -323,7 +340,7 @@ orgsRouter.get(
 
     const counts = await prisma.ticket.groupBy({
       by: ["status"],
-      where: { assigneeId: membership.userId, archivedAt: null, project: { orgId } },
+      where: { assigneeId: membership.userId, archivedAt: null, project: { orgId, archivedAt: null } },
       _count: true,
     });
     const ticketCounts = { OPEN: 0, IN_PROGRESS: 0, DONE: 0 };
@@ -363,7 +380,7 @@ orgsRouter.get(
     const where = {
       assigneeId: req.params.userId,
       archivedAt: null,
-      project: { orgId },
+      project: { orgId, archivedAt: null },
       ...(status ? { status } : {}),
       ...(priority ? { priority } : {}),
       ...(type ? { type } : {}),

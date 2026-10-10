@@ -1,3 +1,4 @@
+import { humanize, q, toast } from "../lib/toast";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -115,6 +116,7 @@ export function Attachments({
   };
 
   const upload = useMutation({
+    meta: { silent: true }, // reported below with the per-file reasons
     mutationFn: () => {
       setPercent(0);
       return api.uploadAttachments(ticketId, staged.files, {
@@ -124,16 +126,26 @@ export function Attachments({
       });
     },
     onSuccess: () => {
+      const files = staged.files;
+      toast.success(
+        files.length === 1 ? `${q(files[0].name)} was uploaded.` : `${files.length} files were uploaded.`,
+      );
       staged.clear();
       setUploadError(null);
       refresh();
     },
-    onError: (e) => setUploadError(uploadErrorMessage(e)),
+    onError: (e) => {
+      const m = uploadErrorMessage(e);
+      setUploadError(m);
+      toast.error(m.message, { title: "Upload failed" });
+    },
   });
 
   const remove = useMutation({
     mutationFn: (a: Attachment) => api.deleteAttachment(a.id),
+    meta: { errorTitle: "Couldn't delete the file" },
     onSuccess: (_d, a) => {
+      toast.success(`File ${q(a.filename)} was deleted.`);
       dropBlobUrl(a.id);
       setDeleting(null);
       setActionError(null);
@@ -414,7 +426,15 @@ function VisibilityModal({
         visibility: value.visibility,
         selectedUserIds: value.visibility === "SELECTED" ? value.selectedUserIds : undefined,
       }),
-    onSuccess: onSaved,
+    meta: { errorTitle: "Couldn't update file visibility" },
+    onSuccess: () => {
+      toast.success(
+        att.visibility === value.visibility
+          ? `Who can see ${q(att.filename)} was updated.`
+          : `Visibility of ${q(att.filename)} changed from ${humanize(att.visibility)} to ${humanize(value.visibility)}.`,
+      );
+      onSaved();
+    },
   });
   const invalid = value.visibility === "SELECTED" && value.selectedUserIds.length === 0;
   const err = (save.error as any)?.response?.data?.error as string | undefined;

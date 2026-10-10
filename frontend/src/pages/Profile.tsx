@@ -1,26 +1,24 @@
+import { apiError, q, toast } from "../lib/toast";
 import { useState } from "react";
 import { api } from "../lib/api";
 import { useAuth } from "../auth";
 import { Avatar } from "../components/ui";
 import { PasswordInput } from "../components/PasswordInput";
-import { IconLock, IconCheckCircle } from "../components/Icons";
+import { IconLock } from "../components/Icons";
 import { TwoFactorCard } from "../components/TwoFactorCard";
 import { PinCard } from "../components/PinCard";
-import { Modal } from "../components/Modal";
 
 export default function Profile() {
   const { me, refresh } = useAuth();
 
   const [name, setName] = useState(me?.name ?? "");
   const [nameErr, setNameErr] = useState<string | null>(null);
-  const [nameSaved, setNameSaved] = useState(false);
   const [savingName, setSavingName] = useState(false);
 
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [pwErr, setPwErr] = useState<string | null>(null);
-  const [pwSaved, setPwSaved] = useState(false);
   const [savingPw, setSavingPw] = useState(false);
 
   if (!me) return null;
@@ -30,11 +28,16 @@ export default function Profile() {
     setNameErr(null);
     setSavingName(true);
     try {
+      const before = me!.name;
+      const after = name.trim();
       await api.updateProfile({ name });
       await refresh();
-      setNameSaved(true);
+      if (after === before) toast.info("Your display name is unchanged.");
+      else toast.success(`Display name changed from ${q(before)} to ${q(after)}.`);
     } catch (e: any) {
-      setNameErr(e?.response?.data?.error ?? "Couldn't update profile.");
+      const msg = e?.response?.data?.error ?? "Couldn't update profile.";
+      setNameErr(msg);
+      toast.error(apiError(e, msg), { title: "Couldn't update your profile" });
     } finally {
       setSavingName(false);
     }
@@ -45,17 +48,20 @@ export default function Profile() {
     setPwErr(null);
     if (newPassword !== confirm) {
       setPwErr("New passwords don't match.");
+      toast.warning("The new password and its confirmation don't match.");
       return;
     }
     setSavingPw(true);
     try {
       await api.changePassword({ currentPassword, newPassword });
-      setPwSaved(true);
+      toast.success("Your password was changed.");
       setCurrentPassword("");
       setNewPassword("");
       setConfirm("");
     } catch (e: any) {
-      setPwErr(e?.response?.data?.error ?? "Couldn't change password.");
+      const msg = e?.response?.data?.error ?? "Couldn't change password.";
+      setPwErr(msg);
+      toast.error(apiError(e, msg), { title: "Couldn't change your password" });
     } finally {
       setSavingPw(false);
     }
@@ -124,30 +130,6 @@ export default function Profile() {
         <TwoFactorCard />
         <PinCard />
       </div>
-
-      <Modal open={nameSaved} onClose={() => setNameSaved(false)} title="Profile updated">
-        <div className="flex items-start gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ok-bg text-ok">
-            <IconCheckCircle size={18} />
-          </div>
-          <p className="pt-1.5 text-sm text-fg-soft">Your profile changes have been saved successfully.</p>
-        </div>
-        <button className="btn btn-primary btn-block mt-5" onClick={() => setNameSaved(false)}>
-          Got it
-        </button>
-      </Modal>
-
-      <Modal open={pwSaved} onClose={() => setPwSaved(false)} title="Password updated">
-        <div className="flex items-start gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ok-bg text-ok">
-            <IconCheckCircle size={18} />
-          </div>
-          <p className="pt-1.5 text-sm text-fg-soft">Your password has been updated successfully.</p>
-        </div>
-        <button className="btn btn-primary btn-block mt-5" onClick={() => setPwSaved(false)}>
-          Got it
-        </button>
-      </Modal>
     </div>
   );
 }

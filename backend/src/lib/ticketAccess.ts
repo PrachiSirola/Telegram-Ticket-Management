@@ -58,8 +58,19 @@ export async function loadTicketForUser(
   return ticket;
 }
 
-/** Archived tickets are read-only: send 409 and return true when blocked. */
-export function rejectIfArchived(ticket: Ticket, res: Response): boolean {
+/**
+ * Archived tickets — and every ticket of an archived project — are read-only:
+ * send 409 and return true when blocked. (Callers load the ticket with its
+ * project via loadTicketForUser, so the project's archive state is visible here.)
+ */
+export function rejectIfArchived(
+  ticket: Ticket & { project?: { archivedAt: Date | null } | null },
+  res: Response,
+): boolean {
+  if (ticket.project?.archivedAt) {
+    res.status(409).json({ error: "This project is archived. Restore it before making changes." });
+    return true;
+  }
   if (!ticket.archivedAt) return false;
   res.status(409).json({ error: "This ticket is archived. Restore it before making changes." });
   return true;

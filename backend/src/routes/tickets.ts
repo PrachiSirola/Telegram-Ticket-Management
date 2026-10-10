@@ -15,6 +15,8 @@ import {
   TICKET_TIEBREAK,
   wantsPagination,
 } from "../lib/pagination.js";
+
+// Optional list filters. Empty string = "no filter" (what the UI sends for "All …").
 const emptyToUndef = (v: unknown) => (v === "" ? undefined : v);
 const listFilterSchema = z.object({
   status: z.preprocess(emptyToUndef, z.enum(["OPEN", "IN_PROGRESS", "DONE"]).optional()),
@@ -22,28 +24,46 @@ const listFilterSchema = z.object({
   type: z.preprocess(emptyToUndef, z.enum(["BUG", "FEATURE", "TASK"]).optional()),
   assigneeId: z.preprocess(emptyToUndef, z.string().optional()),
   q: z.preprocess(emptyToUndef, z.string().optional()),
+  // Archived tickets are hidden by default; the team can view them separately.
   archived: z.preprocess(emptyToUndef, z.enum(["active", "archived", "all"]).optional()),
+  // Tickets due on this calendar day (yyyy-mm-dd). Due dates are saved as a plain
+  // date (midnight UTC of the day that was picked), so the day is matched as that
+  // UTC calendar day — independent of the server's or viewer's timezone.
+  dueDate: z.preprocess(
+    emptyToUndef,
+    z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .refine((d) => !Number.isNaN(Date.parse(`${d}T00:00:00Z`)) && new Date(`${d}T00:00:00Z`).toISOString().startsWith(d))
+      .optional(),
+  ),
 });
+
+/** What the signed-in user may do with a ticket — computed server-side, enforced again on each route. */
 export function ticketPermissions(
   user: Parameters<typeof isInternal>[0],
   orgId: string,
-  ticket: { reporterId: string; archivedAt: Date | null },
+  ticket: { reporterId: string; archivedAt: Date | null; project?: { archivedAt: Date | null } | null },
 ) {
   const internal = isInternal(user, orgId);
   const admin = isAdminOrAbove(user, orgId);
   const reporter = ticket.reporterId === user.id;
-  const live = !ticket.archivedAt;
+  // A ticket of an archived project is read-only, exactly like an archived ticket.
+  const projectArchived = Boolean(ticket.project?.archivedAt);
+  const live = !ticket.archivedAt && !projectArchived;
   return {
+    // Details (title, description, type, due date): Admins / Super Admins only;
+    // the reporting customer may still fix their own ticket's text.
     edit: live && (admin || (reporter && !internal)),
     changeStatus: live && internal,
     changePriority: live && internal,
     assign: live && admin,
     selfAssign: live && internal,
-    duplicate: admin,
-    addFollower: admin,
+    duplicate: admin && !projectArchived,
+    addFollower: admin && !projectArchived,
     move: live && admin,
     archive: live && admin,
-    restore: !live && admin,
+    restore: Boolean(ticket.archivedAt) && !projectArchived && admin,
     delete: admin || (orgRole(user, orgId) !== "DEVELOPER" && reporter),
   };
 }
@@ -55,7 +75,9 @@ function serialize(t: any) {
     id: t.id,
     projectId: t.projectId,
     orgId: t.project?.orgId,
-    project: t.project ? { id: t.project.id, name: t.project.name } : undefined,
+    project: t.project
+      ? { id: t.project.id, name: t.project.name, archivedAt: t.project.archivedAt ?? null }
+      : undefined,
     title: t.title,
     description: t.description,
     status: t.status,
@@ -74,14 +96,20 @@ function serialize(t: any) {
 const ticketInclude = {
   assignee: userSelect,
   reporter: userSelect,
-  project: { select: { id: true, name: true, orgId: true } },
+  project: { select: { id: true, name: true, orgId: true, archivedAt: true } },
 };
+
+/** Is userId an active internal (non-client) member of the org? */
 async function isAssignableMember(userId: string, orgId: string) {
   const m = await prisma.orgMembership.findUnique({
     where: { userId_orgId: { userId, orgId } },
   });
   return Boolean(m && !m.disabled && m.role !== "CLIENT");
 }
+
+// ---------------------------------------------------------------------------
+// Project-scoped: /orgs/:orgId/projects/:projectId/tickets
+// ---------------------------------------------------------------------------
 export const projectTicketsRouter = Router({ mergeParams: true });
 
 projectTicketsRouter.get(
@@ -92,7 +120,11 @@ projectTicketsRouter.get(
   async (req, res) => {
     const filters = listFilterSchema.safeParse(req.query);
     if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
-    const { status, priority, type, assigneeId, q, archived } = filters.data;
+    const { status, priority, type, assigneeId, q, archived, dueDate } = filters.data;
+    const dueStart = dueDate ? new Date(`${dueDate}T00:00:00Z`) : null;
+    const dueEnd = dueStart ? new Date(dueStart.getTime() + 24 * 60 * 60 * 1000) : null;
+
+    // Customers never see archived tickets, whatever they ask for.
     const archivedMode = isInternal(req.user!, req.params.orgId) ? archived ?? "active" : "active";
     const where = {
       projectId: req.project!.id,
@@ -102,13 +134,21 @@ projectTicketsRouter.get(
       ...(priority ? { priority } : {}),
       ...(type ? { type } : {}),
       ...(assigneeId ? { assigneeId } : {}),
+      ...(dueStart && dueEnd ? { dueDate: { gte: dueStart, lt: dueEnd } } : {}),
       ...(q ? { title: { contains: q, mode: "insensitive" as const } } : {}),
     };
+    // `id` makes the order total, so no ticket repeats or disappears between pages.
     const orderBy = [{ updatedAt: "desc" as const }, TICKET_TIEBREAK];
+
+    // Opt-in pagination (same convention as projects/members): without `page`
+    // the response is the plain array it has always been.
     if (!wantsPagination(req.query)) {
       const tickets = await prisma.ticket.findMany({ where, include: ticketInclude, orderBy });
       return res.json(tickets.map(serialize));
     }
+
+    // Filters, count and page slice all share the same `where`, so `total`
+    // is the FILTERED total and only one page of rows leaves the database.
     const paged = await paginate(
       parsePageParams(req.query),
       () => prisma.ticket.count({ where }),
@@ -142,6 +182,11 @@ projectTicketsRouter.post(
     const user = req.user!;
     const orgId = req.params.orgId;
     const projectId = req.project!.id;
+    if (req.project!.archivedAt) {
+      return res.status(409).json({ error: "This project is archived. Restore it before adding tickets." });
+    }
+
+    // Only SA/Admin may assign on creation; assignees are internal members.
     let assigneeId: string | null = null;
     if (data.assigneeId) {
       if (!isAdminOrAbove(user, orgId)) {
@@ -187,6 +232,8 @@ projectTicketsRouter.post(
       }
       return created;
     });
+
+    // Announce to the org's Telegram chat (no in-app recipients here).
     await notify({
       recipientIds: [],
       type: "ASSIGNED",
@@ -212,6 +259,9 @@ projectTicketsRouter.post(
         message: `${user.name} assigned you the ticket "${ticket.title}".`,
       });
     }
+
+    // Mentions in the description — notify() filters to actual org members
+    // (and, for clients, project attachment).
     if (data.mentions?.length) {
       const mentioned = await prisma.user.findMany({
         where: { id: { in: data.mentions } },
@@ -234,6 +284,10 @@ projectTicketsRouter.post(
     res.status(201).json(serialize(ticket));
   },
 );
+
+// ---------------------------------------------------------------------------
+// By id: /tickets/:id
+// ---------------------------------------------------------------------------
 export const ticketsRouter = Router();
 
 ticketsRouter.get("/:id", requireAuth, async (req, res) => {
@@ -255,6 +309,7 @@ ticketsRouter.get("/:id", requireAuth, async (req, res) => {
     : false;
   res.json({
     ...serialize(full),
+    // Followers are an internal-team feature; customers are never told who follows.
     followerCount: internal ? await prisma.ticketFollower.count({ where: { ticketId: ticket.id } }) : undefined,
     following,
     can: ticketPermissions(user, orgId, ticket),
@@ -287,6 +342,9 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
   const isReporter = ticket.reporterId === user.id;
 
   const data: Record<string, unknown> = {};
+
+  // Content fields: internal team always; the reporting client may edit
+  // title/description of their own ticket.
   if (body.title !== undefined) {
     if (!admin && !(isReporter && !internal)) return res.status(403).json({ error: "Only admins can edit ticket details" });
     data.title = body.title;
@@ -304,12 +362,16 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
       data[field] = field === "dueDate" && body.dueDate ? new Date(body.dueDate) : body[field];
     }
   }
+
+  // Status: internal team only.
   let statusChanged = false;
   if (body.status !== undefined) {
     if (!internal) return res.status(403).json({ error: "Cannot change status" });
     statusChanged = body.status !== ticket.status;
     data.status = body.status;
   }
+
+  // Assignee (arbitrary): SA/Admin only; assignees are internal members.
   let newAssignee: string | null | undefined;
   if (body.assigneeId !== undefined) {
     if (!admin) return res.status(403).json({ error: "Only admins can reassign" });
@@ -336,6 +398,8 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
       logActivity(tx, { ticketId: ticket.id, actorId: user.id, ...a });
 
     if (statusChanged) {
+      // Source of truth for "when was this completed" — see the model's doc
+      // comment in schema.prisma for why this exists separately from updatedAt.
       await tx.ticketStatusHistory.create({
         data: {
           ticketId: ticket.id,

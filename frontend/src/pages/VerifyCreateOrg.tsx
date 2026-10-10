@@ -1,3 +1,4 @@
+import { failure, q, toast } from "../lib/toast";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -37,12 +38,13 @@ export default function VerifyCreateOrg() {
       try {
         const org = await api.verifyCreateOrg(token);
         setOrgName(org.name);
+        toast.success(`Organisation ${q(org.name)} was created. You are its Super Admin.`);
         setActiveOrg(org.id);
         await refresh();
         await qc.invalidateQueries({ queryKey: ["orgs"] });
         setStatus("done");
       } catch (e: any) {
-        setErr(e?.response?.data?.error ?? "This confirmation link is invalid or has expired.");
+        setErr(failure(e, "This confirmation link is invalid or has expired."));
         setStatus("error");
       }
     })();

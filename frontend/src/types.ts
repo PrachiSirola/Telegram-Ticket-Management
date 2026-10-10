@@ -9,7 +9,8 @@ export type AttachmentVisibility = "INTERNAL" | "CLIENT_VISIBLE" | "SELECTED";
 
 export type WorkRange = "current" | "today" | "week" | "prev_week" | "month" | "prev_month" | "custom";
 export type WorkStatusFilter = "all" | "pending" | "in_progress" | "completed" | "overdue";
-export type ProjectStatusFilter = "new" | "active" | "closed" | undefined;
+/** undefined = "All" (every non-archived project); "current" = New + Active (the Dashboard default). */
+export type ProjectStatusFilter = "current" | "new" | "active" | "closed" | "archived" | undefined;
 
 /** Envelope shape for opt-in server-side pagination (projects, org members). */
 export interface Paged<T> {
@@ -28,6 +29,8 @@ export interface TicketPage<T> extends Paged<T> {
 
 export interface ProjectCounts {
   all: number;
+  current: number;
+  archived: number;
   new: number;
   active: number;
   closed: number;
@@ -47,12 +50,15 @@ export interface Me {
 export interface Organization {
   id: string;
   name: string;
+  /** IANA timezone that decides what "today" means for this organisation. */
+  timezone: string;
   role: OrgRole;
 }
 
 export interface OrgSettings {
   id: string;
   name: string;
+  timezone: string;
   telegramBotToken: string | null; // masked by the API
   telegramChatId: string | null;
   telegramConfigured: boolean;
@@ -64,6 +70,15 @@ export interface Project {
   description: string;
   ticketCount: number;
   createdAt: string;
+  /** Set when the project is archived (hidden from lists, read-only). */
+  archivedAt?: string | null;
+}
+
+/** What deleting a project would remove (shown in the delete dialog). */
+export interface ProjectImpact {
+  tickets: number;
+  comments: number;
+  attachments: number;
 }
 
 export interface OrgMember {
@@ -86,6 +101,20 @@ export interface OrgInvite {
   projectIds: string[];
   expiresAt: string;
   inviteUrl: string | null;
+}
+
+export interface BulkInviteResult {
+  email: string;
+  status: "invited" | "skipped" | "invalid";
+  reason?: string;
+  /** invited only: whether the email went out (the invite + link exist either way). */
+  emailSent?: boolean;
+  inviteUrl?: string;
+}
+
+export interface BulkInviteResponse {
+  results: BulkInviteResult[];
+  summary: { total: number; invited: number; emailFailed: number; skipped: number; invalid: number };
 }
 
 export interface InviteInfo {
@@ -114,7 +143,7 @@ export interface Ticket {
   id: string;
   projectId: string;
   orgId?: string;
-  project?: { id: string; name: string };
+  project?: { id: string; name: string; archivedAt?: string | null };
   title: string;
   description: string;
   status: TicketStatus;

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { humanize, q, toast } from "../lib/toast";
 import { MenuButton, type MenuItem } from "./ActionMenu";
 import { ConfirmModal } from "./ConfirmModal";
 import { Dropdown } from "./Dropdown";
@@ -25,12 +26,17 @@ const PRIORITIES: TicketPriority[] = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 const TYPES: TicketType[] = ["BUG", "FEATURE", "TASK"];
 const label = (v: string) => v.replace("_", " ");
 
-type Notice = { kind: "ok" | "error"; text: string } | null;
-
 function errText(e: any, fallback: string) {
   const d = e?.response?.data?.error;
   return typeof d === "string" ? d : fallback;
 }
+
+/**
+ * Edit · Assign · Status · Priority · More (Duplicate, Move, Add Follower,
+ * Copy Link, Archive/Restore, Delete). Which buttons show is decided by the
+ * `can` flags the API computes for the signed-in user; the API enforces the
+ * same rules again on every request.
+ */
 export function TicketActions({
   ticket,
   me,
@@ -43,40 +49,56 @@ export function TicketActions({
   const can = ticket.can;
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [notice, setNotice] = useState<Notice>(null);
   const [modal, setModal] = useState<
     null | "edit" | "move" | "followers" | "archive" | "restore" | "delete" | "duplicate"
   >(null);
-  const timer = useRef<number>();
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-
-  const flash = (n: Notice) => {
-    setNotice(n);
-    window.clearTimeout(timer.current);
-    if (n?.kind === "ok") timer.current = window.setTimeout(() => setNotice(null), 3500);
-  };
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["ticket", ticket.id] });
     qc.invalidateQueries({ queryKey: ["activity", ticket.id] });
     qc.invalidateQueries({ queryKey: ["tickets"] });
+    // Status changes move a project's open-ticket count (and so its position on the Dashboard).
     qc.invalidateQueries({ queryKey: ["projects"] });
   };
 
   const update = useMutation({
     mutationFn: (data: Parameters<typeof api.updateTicket>[1]) => api.updateTicket(ticket.id, data),
-    onSuccess: () => {
-      setNotice(null);
+    meta: { errorTitle: `Couldn't update ${q(ticket.title)}` },
+    // Snapshot the "before" values at click time so the toast can say what changed.
+    onMutate: () => ({
+      title: ticket.title,
+      status: ticket.status,
+      priority: ticket.priority,
+      assignee: ticket.assignee?.name ?? null,
+    }),
+    onSuccess: (_res, data, before) => {
+      const t = q(before?.title ?? ticket.title);
+      const parts: string[] = [];
+      if (data.status && data.status !== before?.status)
+        parts.push(`status changed from ${humanize(before?.status)} to ${humanize(data.status)}`);
+      if (data.priority && data.priority !== before?.priority)
+        parts.push(`priority changed from ${humanize(before?.priority)} to ${humanize(data.priority)}`);
+      if ("assigneeId" in data) {
+        const to = data.assigneeId ? assignable.find((m) => m.userId === data.assigneeId)?.name ?? "the selected member" : null;
+        if (!to) parts.push(`unassigned${before?.assignee ? ` (was ${before.assignee})` : ""}`);
+        else if (before?.assignee) parts.push(`reassigned from ${before.assignee} to ${to}`);
+        else parts.push(`assigned to ${to}`);
+      }
+      toast.success(parts.length ? `Ticket ${t}: ${parts.join("; ")}.` : `Ticket ${t} was updated.`);
       refresh();
     },
-    onError: (e) => flash({ kind: "error", text: errText(e, "Couldn't update the ticket.") }),
   });
   const selfAssign = useMutation({
     mutationFn: () => api.selfAssign(ticket.id),
-    onSuccess: () => {
-      setNotice(null);
+    meta: { errorTitle: `Couldn't assign ${q(ticket.title)}` },
+    onMutate: () => ({ title: ticket.title, assignee: ticket.assignee?.name ?? null }),
+    onSuccess: (_res, _v, before) => {
+      toast.success(
+        before?.assignee
+          ? `Ticket ${q(before.title)} reassigned from ${before.assignee} to you.`
+          : `Ticket ${q(before?.title ?? ticket.title)} assigned to you.`,
+      );
       refresh();
     },
-    onError: (e) => flash({ kind: "error", text: errText(e, "Couldn't assign the ticket.") }),
   });
 
   async function copyLink() {
@@ -84,6 +106,7 @@ export function TicketActions({
     try {
       await navigator.clipboard.writeText(url);
     } catch {
+      // Clipboard API needs HTTPS / permission; fall back to a hidden textarea.
       const ta = document.createElement("textarea");
       ta.value = url;
       ta.style.position = "fixed";
@@ -92,9 +115,9 @@ export function TicketActions({
       ta.select();
       const ok = document.execCommand("copy");
       ta.remove();
-      if (!ok) return flash({ kind: "error", text: `Couldn't copy automatically. Link: ${url}` });
+      if (!ok) return void toast.warning(`Couldn't copy automatically. Link: ${url}`, { title: "Copy failed", duration: 10000 });
     }
-    flash({ kind: "ok", text: "Link copied to clipboard." });
+    toast.success(`Link to ${q(ticket.title)} copied to clipboard.`);
   }
 
   if (!can) return null;
@@ -187,16 +210,6 @@ export function TicketActions({
         />
       </div>
 
-      {notice && (
-        <div
-          className={`alert ${notice.kind === "ok" ? "alert-ok" : "alert-danger"} mt-3 text-sm`}
-          role={notice.kind === "ok" ? "status" : "alert"}
-          data-testid="action-notice"
-        >
-          {notice.text}
-        </div>
-      )}
-
       {modal === "edit" && (
         <EditModal
           ticket={ticket}
@@ -205,7 +218,6 @@ export function TicketActions({
           onSaved={() => {
             setModal(null);
             refresh();
-            flash({ kind: "ok", text: "Ticket updated." });
           }}
         />
       )}
@@ -217,7 +229,7 @@ export function TicketActions({
             setModal(null);
             refresh();
             qc.invalidateQueries({ queryKey: ["projects"] });
-            flash({ kind: "ok", text: `Moved to ${name}.` });
+            toast.success(`Ticket ${q(ticket.title)} moved from ${q(ticket.project?.name ?? "its project")} to ${q(name)}.`);
           }}
         />
       )}
@@ -233,7 +245,7 @@ export function TicketActions({
           }}
         />
       )}
-      <ActionConfirms ticket={ticket} modal={modal} close={() => setModal(null)} navigate={navigate} flash={flash} refresh={refresh} />
+      <ActionConfirms ticket={ticket} modal={modal} close={() => setModal(null)} navigate={navigate} refresh={refresh} />
     </div>
   );
 }
@@ -244,14 +256,12 @@ function ActionConfirms({
   modal,
   close,
   navigate,
-  flash,
   refresh,
 }: {
   ticket: Ticket;
   modal: string | null;
   close: () => void;
   navigate: (to: string) => void;
-  flash: (n: Notice) => void;
   refresh: () => void;
 }) {
   const qc = useQueryClient();
@@ -260,7 +270,9 @@ function ActionConfirms({
 
   const duplicate = useMutation({
     mutationFn: () => api.duplicateTicket(ticket.id),
+    meta: { errorTitle: `Couldn't duplicate ${q(ticket.title)}` },
     onSuccess: (copy) => {
+      toast.success(`Ticket ${q(`Copy of ${ticket.title}`)} was created from ${q(ticket.title)}.`);
       close();
       qc.invalidateQueries({ queryKey: ["tickets"] });
       qc.invalidateQueries({ queryKey: ["activity", ticket.id] });
@@ -270,25 +282,29 @@ function ActionConfirms({
   });
   const archive = useMutation({
     mutationFn: () => api.archiveTicket(ticket.id),
+    meta: { errorTitle: `Couldn't archive ${q(ticket.title)}` },
     onSuccess: () => {
       close();
       refresh();
-      flash({ kind: "ok", text: "Ticket archived. It's hidden from lists and customers; you can restore it any time." });
+      toast.success(`Ticket ${q(ticket.title)} has been archived. You can restore it any time.`);
     },
     onError: (e) => setError(errText(e, "Couldn't archive the ticket.")),
   });
   const restore = useMutation({
     mutationFn: () => api.restoreTicket(ticket.id),
+    meta: { errorTitle: `Couldn't restore ${q(ticket.title)}` },
     onSuccess: () => {
       close();
       refresh();
-      flash({ kind: "ok", text: "Ticket restored." });
+      toast.success(`Ticket ${q(ticket.title)} has been restored.`);
     },
     onError: (e) => setError(errText(e, "Couldn't restore the ticket.")),
   });
   const del = useMutation({
     mutationFn: () => api.deleteTicket(ticket.id),
+    meta: { errorTitle: `Couldn't delete ${q(ticket.title)}` },
     onSuccess: () => {
+      toast.success(`Ticket ${q(ticket.title)} has been permanently deleted.`);
       qc.invalidateQueries({ queryKey: ["tickets"] });
       qc.invalidateQueries({ queryKey: ["projects"] });
       navigate(`/projects/${ticket.projectId}`);
@@ -394,6 +410,7 @@ function EditModal({
   const [due, setDue] = useState(ticket.dueDate ? ticket.dueDate.slice(0, 10) : "");
 
   const save = useMutation({
+    meta: { errorTitle: `Couldn't save ${q(ticket.title)}` },
     mutationFn: () => {
       const data: Parameters<typeof api.updateTicket>[1] = {};
       if (title.trim() !== ticket.title) data.title = title.trim();
@@ -405,7 +422,18 @@ function EditModal({
       }
       return Object.keys(data).length ? api.updateTicket(ticket.id, data) : Promise.resolve(ticket);
     },
-    onSuccess: onSaved,
+    onSuccess: () => {
+      // Describe what actually changed, with before -> after where it helps.
+      const parts: string[] = [];
+      const prevDue = ticket.dueDate ? ticket.dueDate.slice(0, 10) : "";
+      if (title.trim() !== ticket.title) parts.push(`title changed to ${q(title.trim())}`);
+      if (description !== (ticket.description ?? "")) parts.push("description updated");
+      if (internal && type !== ticket.type) parts.push(`type changed from ${humanize(ticket.type)} to ${humanize(type)}`);
+      if (internal && due !== prevDue) parts.push(`due date changed from ${prevDue || "none"} to ${due || "none"}`);
+      if (parts.length) toast.success(`Ticket ${q(ticket.title)}: ${parts.join("; ")}.`);
+      else toast.info("No changes to save.");
+      onSaved();
+    },
   });
   const err = (save.error as any)?.response?.data?.error;
 
@@ -491,6 +519,7 @@ function MoveModal({
   const [target, setTarget] = useState("");
   const move = useMutation({
     mutationFn: () => api.moveTicket(ticket.id, target),
+    meta: { errorTitle: `Couldn't move ${q(ticket.title)}` },
     onSuccess: () => onMoved(targets.find((p) => p.id === target)?.name ?? "the project"),
   });
   const err = (move.error as any)?.response?.data?.error;
@@ -559,7 +588,10 @@ function FollowersModal({
   };
   const add = useMutation({
     mutationFn: (userId?: string) => api.addFollower(ticket.id, userId),
-    onSuccess: () => {
+    meta: { errorTitle: "Couldn't add the follower" },
+    onSuccess: (_r, userId) => {
+      const who = userId && userId !== me?.id ? (team ?? []).find((m) => m.userId === userId)?.name : null;
+      toast.success(who ? `${who} is now following ${q(ticket.title)}.` : `You are now following ${q(ticket.title)}.`);
       setPick("");
       setError(null);
       done();
@@ -568,7 +600,10 @@ function FollowersModal({
   });
   const remove = useMutation({
     mutationFn: (userId: string) => api.removeFollower(ticket.id, userId),
-    onSuccess: () => {
+    meta: { errorTitle: "Couldn't remove the follower" },
+    onSuccess: (_r, userId) => {
+      const who = userId === me?.id ? null : (followers ?? []).find((f) => f.id === userId)?.name;
+      toast.success(who ? `${who} was removed from followers of ${q(ticket.title)}.` : `You unfollowed ${q(ticket.title)}.`);
       setError(null);
       done();
     },

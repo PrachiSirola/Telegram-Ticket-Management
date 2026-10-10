@@ -1,3 +1,4 @@
+import { failure, toast } from "../lib/toast";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
@@ -19,14 +20,16 @@ export default function ResetPin() {
     setErr(null);
     if (pin !== confirmPin) {
       setErr("PINs don't match.");
+      toast.warning("The PINs you entered don't match.");
       return;
     }
     setBusy(true);
     try {
       await api.resetPin({ token, pin, confirmPin });
       setDone(true);
+      toast.success("Your PIN was reset. You can now sign in.");
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't reset your PIN. The link may have expired.");
+      setErr(failure(e, "Couldn't reset your PIN. The link may have expired."));
     } finally {
       setBusy(false);
     }

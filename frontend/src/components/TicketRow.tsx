@@ -11,13 +11,17 @@ import { IconArrowRight } from "./Icons";
 export function TicketRow({
   ticket,
   showProject,
+  linkState,
 }: {
   ticket: Ticket;
   showProject?: boolean;
+  /** Router state for the link (e.g. backState(...) so the ticket page can offer "Back"). */
+  linkState?: unknown;
 }) {
   return (
     <Link
       to={`/tickets/${ticket.id}`}
+      state={linkState}
       className="
         group
         flex

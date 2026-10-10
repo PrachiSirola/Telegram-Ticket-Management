@@ -1,3 +1,4 @@
+import { failure, toast } from "../lib/toast";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -39,7 +40,7 @@ export default function Login() {
         navigate("/");
       }
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Something went wrong. Please try again.");
+      setErr(failure(e, "Something went wrong. Please try again."));
     } finally {
       setBusy(false);
     }
@@ -54,7 +55,7 @@ export default function Login() {
       await refresh();
       navigate("/");
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Incorrect PIN.");
+      setErr(failure(e, "Incorrect PIN."));
     } finally {
       setBusy(false);
     }
@@ -66,8 +67,9 @@ export default function Login() {
     try {
       await api.forgotPin();
       setForgotSent(true);
+      toast.success("PIN reset email sent. Check your inbox.");
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't send reset email.");
+      setErr(failure(e, "Couldn't send reset email."));
     } finally {
       setForgotBusy(false);
     }
@@ -146,7 +148,7 @@ export default function Login() {
           <div className="card p-8">
             <h1 className="text-2xl font-bold tracking-tight text-fg">Enter your PIN</h1>
             <p className="mb-6 mt-1 text-sm text-fg-soft">
-              Two-factor authentication is enabled for this account.
+              Passkey authentication is enabled for this account.
             </p>
 
             <form onSubmit={submitPin} className="grid gap-4">

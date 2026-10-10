@@ -1,3 +1,4 @@
+import { failure, toast } from "../lib/toast";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
@@ -24,15 +25,17 @@ export default function Signup() {
     setErr(null);
     if (password !== confirmPw) {
       setErr("Passwords don't match.");
+      toast.warning("The passwords you entered don't match.");
       return;
     }
     setBusy(true);
     try {
       await api.signup({ orgName, name, email, password });
       setStep("otp");
+      toast.info(`Verification code sent to ${email}.`);
       setInfo(`We sent a 6-digit code to ${email}.`);
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Something went wrong. Please try again.");
+      setErr(failure(e, "Something went wrong. Please try again."));
     } finally {
       setBusy(false);
     }
@@ -45,9 +48,10 @@ export default function Signup() {
     try {
       await api.verifySignup({ email, code });
       await refresh();
+      toast.success(`Account created. Welcome to ${orgName || "your new workspace"}!`);
       navigate("/");
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Verification failed. Please try again.");
+      setErr(failure(e, "Verification failed. Please try again."));
     } finally {
       setBusy(false);
     }
@@ -58,8 +62,9 @@ export default function Signup() {
     try {
       await api.resendSignupOtp(email);
       setInfo(`A new code is on its way to ${email}.`);
+      toast.success(`A new verification code was sent to ${email}.`);
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't resend the code.");
+      setErr(failure(e, "Couldn't resend the code."));
     }
   }
 

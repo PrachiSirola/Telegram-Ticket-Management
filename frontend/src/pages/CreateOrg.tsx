@@ -1,3 +1,4 @@
+import { failure, toast } from "../lib/toast";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
@@ -24,8 +25,9 @@ export default function CreateOrg() {
     try {
       await api.requestCreateOrg(name);
       setSent(true);
+      toast.info(`Confirmation link sent for ${JSON.stringify(name.trim())}. Open it from your email to create the organisation.`);
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't send the confirmation email.");
+      setErr(failure(e, "Couldn't send the confirmation email."));
     } finally {
       setBusy(false);
     }
