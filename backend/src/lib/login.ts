@@ -97,6 +97,7 @@ export async function getInviteByToken(token: string) {
   return {
     email: invite.email,
     role: invite.role,
+    orgId: org.id,
     orgName: org.name,
     projectNames: projects.map((p) => p.name),
     accountExists: Boolean(existing),

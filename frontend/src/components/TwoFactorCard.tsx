@@ -7,7 +7,7 @@ export function TwoFactorCard() {
   const [status, setStatus] = useState<{ twoFactorEnabled: boolean; hasPin: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [justEnabled, setJustEnabled] = useState<boolean | null>(null); // true = enabled, false = disabled
+  const [justEnabled, setJustEnabled] = useState<boolean | null>(null); 
 
   useEffect(() => {
     api.twoFactorStatus().then(setStatus);

@@ -6,6 +6,33 @@ function required(name: string, fallback?: string): string {
   return v;
 }
 
+export type EmailProvider = "brevo" | "smtp" | "both" | "console";
+
+const brevoApiKey = process.env.BREVO_API_KEY ?? "";
+
+/**
+ * Which transport sends email. Priority:
+ *   1. EMAIL_PROVIDER=brevo | smtp | both | console  (explicit choice always wins;
+ *      "both" = Mailpit copy AND real delivery through Brevo, e.g. so mail to
+ *      mailinator.com actually arrives while you still see it in Mailpit)
+ *   2. NODE_ENV=production      -> Brevo (console log if there is no API key)
+ *   3. NODE_ENV=development/test-> smtp (Mailpit on localhost:1025), even if a
+ *                                  Brevo key is lying around in .env
+ *   4. NODE_ENV unset           -> Brevo if a key exists (keeps old behaviour),
+ *                                  otherwise smtp
+ */
+function resolveEmailProvider(): EmailProvider {
+  const explicit = (process.env.EMAIL_PROVIDER ?? "").trim().toLowerCase();
+  if (explicit === "brevo" || explicit === "smtp" || explicit === "both" || explicit === "console") return explicit;
+  if (explicit) {
+    console.warn(`[email] Unknown EMAIL_PROVIDER="${explicit}" (use brevo, smtp, both or console) — using the default for this environment.`);
+  }
+  const nodeEnv = process.env.NODE_ENV;
+  if (nodeEnv === "production") return brevoApiKey ? "brevo" : "console";
+  if (nodeEnv === undefined || nodeEnv === "") return brevoApiKey ? "brevo" : "smtp";
+  return "smtp";
+}
+
 export const env = {
   port: Number(process.env.PORT ?? 4000),
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -27,16 +54,24 @@ export const env = {
   // on outside local development.
   frontendUrl: process.env.FRONTEND_URL ?? "http://localhost:1020",
 
-  // Transactional email (signup OTPs, invites, password resets) via
-  // Brevo's HTTP API (not SMTP — Render blocks outbound SMTP ports on
-  // its free tier, see lib/email.ts for the full story). Falls back to
-  // console logging if BREVO_API_KEY isn't set (e.g. local dev without
-  // email configured).
+  // Transactional email (signup OTPs, invites, password resets).
+  //   production : Brevo's HTTP API (Render blocks outbound SMTP ports on its
+  //                free tier — see lib/email.ts for the full story)
+  //   development: Mailpit over plain SMTP (localhost:1025, UI on :8025)
+  //   console    : just prints the email to the server log
+  // See resolveEmailProvider() above and the "Email" section of the README.
   email: {
-    brevoApiKey: process.env.BREVO_API_KEY ?? "",
+    provider: resolveEmailProvider(),
+    brevoApiKey,
     from: process.env.SMTP_FROM ?? "Ticketmanagement <no-reply@example.com>",
+    // Only used by the "smtp" provider. Defaults match Mailpit's.
+    smtp: {
+      host: process.env.SMTP_HOST ?? "localhost",
+      port: Number(process.env.SMTP_PORT ?? 1025),
+    },
+    /** True when a real transport is active (drives the "password reset available" flag). */
     get enabled() {
-      return Boolean(this.brevoApiKey);
+      return this.provider === "smtp" || this.provider === "both" || (this.provider === "brevo" && Boolean(this.brevoApiKey));
     },
   },
 

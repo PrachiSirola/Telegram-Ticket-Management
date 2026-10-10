@@ -40,6 +40,8 @@ export function TicketRow({
             {ticket.title}
           </h3>
 
+          {ticket.archivedAt && <span className="badge b-outline-muted">Archived</span>}
+
           {showProject && ticket.project && (
             <span className="rounded-full bg-accent px-2.5 py-0.5 text-[11px] font-medium text-primary">
               {ticket.project.name}

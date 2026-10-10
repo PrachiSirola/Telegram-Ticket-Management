@@ -4,7 +4,16 @@ import { env } from "./env.js";
 const app = createApp();
 app.listen(env.port, () => {
   console.log(`API listening on http://localhost:${env.port}`);
-  const emailMode = env.email.enabled ? "Brevo API" : "console fallback";
+  const emailMode =
+    env.email.provider === "both"
+      ? `Mailpit at ${env.email.smtp.host}:${env.email.smtp.port} (http://localhost:8025) + Brevo for real delivery${env.email.brevoApiKey ? "" : " — BREVO_API_KEY is NOT set, real delivery will fail"}`
+      : env.email.provider === "smtp"
+      ? `Mailpit/SMTP at ${env.email.smtp.host}:${env.email.smtp.port} (inbox UI: http://localhost:8025)`
+      : env.email.provider === "brevo"
+        ? env.email.brevoApiKey
+          ? "Brevo API"
+          : "Brevo API — BREVO_API_KEY is NOT set, emails will fail"
+        : "console (printed to this log)";
   console.log(`  Email: ${emailMode}`);
   console.log(`  Frontend URL: ${env.frontendUrl}`);
 

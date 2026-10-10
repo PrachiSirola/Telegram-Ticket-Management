@@ -1,13 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Organization } from "@prisma/client";
 import { prisma } from "../prisma.js";
-import { isPlatformSuperAdmin, type AuthUser } from "./access.js";
+import { canCreateOrganisation, type AuthUser } from "./access.js";
 
 const TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutes — matches the copy in orgCreationVerifyEmail
 
 export class NotPlatformAdminError extends Error {
   constructor() {
-    super("Only the platform Super Admin can create organisations.");
+    super("Only a Super Admin can create organisations.");
   }
 }
 
@@ -22,7 +22,7 @@ function hashToken(token: string) {
 }
 
 /**
- * Step 1: gate on the fixed platform Super Admin, stash the requested org
+ * Step 1: gate on "is a Super Admin of some organisation", stash the requested org
  * name behind an emailed confirmation token. Nothing is created yet — the
  * org only materialises once the link is clicked (see verifyAndCreateOrg).
  * Any previous outstanding request from this user is superseded (not
@@ -32,7 +32,7 @@ export async function requestOrgCreation(
   user: AuthUser,
   orgNameRaw: string,
 ): Promise<{ token: string }> {
-  if (!isPlatformSuperAdmin(user)) throw new NotPlatformAdminError();
+  if (!canCreateOrganisation(user)) throw new NotPlatformAdminError();
 
   const orgName = orgNameRaw.trim();
   const token = randomBytes(32).toString("hex");
@@ -53,7 +53,10 @@ export async function requestOrgCreation(
  * platform-admin gate against fresh data — covers the edge case where the
  * requester's platform access was revoked between request and click.
  */
-export async function verifyAndCreateOrg(token: string): Promise<{ org: Organization }> {
+export async function verifyAndCreateOrg(
+  token: string,
+  confirmingUserId: string,
+): Promise<{ org: Organization }> {
   const record = await prisma.orgCreationRequest.findUnique({
     where: { tokenHash: hashToken(token) },
     include: { requestedBy: { include: { memberships: { where: { disabled: false } } } } },
@@ -61,7 +64,9 @@ export async function verifyAndCreateOrg(token: string): Promise<{ org: Organiza
   if (!record || record.verifiedAt || record.createdOrgId || record.expiresAt < new Date()) {
     throw new InvalidOrgCreationTokenError();
   }
-  if (!isPlatformSuperAdmin(record.requestedBy)) throw new NotPlatformAdminError();
+  // The link is only good for the person who asked for it (a leaked link alone isn't enough).
+  if (record.requestedById !== confirmingUserId) throw new InvalidOrgCreationTokenError();
+  if (!canCreateOrganisation(record.requestedBy)) throw new NotPlatformAdminError();
 
   const org = await prisma.$transaction(async (tx) => {
     const org = await tx.organization.create({ data: { name: record.orgName } });

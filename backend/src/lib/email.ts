@@ -1,4 +1,4 @@
-import { env } from "../env.js";
+import { env, type EmailProvider } from "../env.js";
 
 /*
   Email delivery via Brevo's HTTP API.
@@ -51,18 +51,114 @@ function parseSender(from: string): { name?: string; email: string } {
   return { email: from.trim() };
 }
 
+export interface SendResult {
+  ok: boolean;
+  provider: EmailProvider;
+  /** Human-readable reason when ok is false (also logged). */
+  error?: string;
+}
+
 /**
- * Send a transactional email via Brevo's HTTP API. Falls back to logging to
- * the console if BREVO_API_KEY isn't set (e.g. local dev without email
- * configured). Never throws — a failed email should never break the
- * request that triggered it (signup, invite, password reset).
+ * Send a transactional email through the configured provider (see env.email):
+ *   - "brevo"   : Brevo's HTTP API — production, unchanged
+ *   - "smtp"    : plain SMTP to Mailpit (localhost:1025) — local development
+ *   - "both"    : Mailpit copy + real delivery through Brevo (local development
+ *                 when you also want mail to reach real inboxes, e.g. Mailinator)
+ *   - "console" : print the email to the server log
+ * Never throws — a failed email should never break the request that triggered
+ * it (signup, invite, password reset). The result says what happened, and
+ * every failure is logged with the provider and a plain-language cause.
  */
-export async function sendEmail(opts: SendEmailOpts) {
-  if (!env.email.enabled) {
-    console.log(
-      `\n[email:console] to=${opts.to} subject="${opts.subject}"\n${opts.text}\n`,
-    );
-    return;
+export async function sendEmail(opts: SendEmailOpts): Promise<SendResult> {
+  const provider = env.email.provider;
+  if (provider === "smtp") return sendViaSmtp(opts);
+  if (provider === "brevo") return sendViaBrevo(opts);
+  if (provider === "both") return sendViaBoth(opts);
+  console.log(
+    `\n[email:console] to=${opts.to} subject="${opts.subject}"\n${opts.text}\n`,
+  );
+  return { ok: true, provider: "console" };
+}
+
+function fail(provider: EmailProvider, to: string, error: string): SendResult {
+  console.error(`[email:${provider}] could not send to ${to}: ${error}`);
+  return { ok: false, provider, error };
+}
+
+// ---- Local development: Mailpit (or any plain SMTP catcher) ----------------
+
+// nodemailer is loaded lazily so production (Brevo over HTTPS) never touches it.
+let smtpTransport: any;
+async function getSmtpTransport() {
+  if (!smtpTransport) {
+    const nodemailer: any = (await import("nodemailer")).default;
+    smtpTransport = nodemailer.createTransport({
+      host: env.email.smtp.host,
+      port: env.email.smtp.port,
+      secure: false, // Mailpit speaks plain SMTP; no auth, no TLS
+      ignoreTLS: true,
+      connectionTimeout: 5_000,
+      greetingTimeout: 5_000,
+      socketTimeout: 10_000,
+    });
+  }
+  return smtpTransport;
+}
+
+function smtpErrorMessage(err: any): string {
+  const where = `${env.email.smtp.host}:${env.email.smtp.port}`;
+  const code = err?.code as string | undefined;
+  if (code === "ECONNREFUSED" || code === "ECONNECTION" || code === "ETIMEDOUT" || code === "ESOCKET" || code === "EDNS") {
+    return `SMTP server not reachable at ${where} (${code}). Is Mailpit running? Try: docker compose up -d mailpit`;
+  }
+  return `SMTP error at ${where}: ${err?.message ?? String(err)}`;
+}
+
+async function sendViaSmtp(opts: SendEmailOpts): Promise<SendResult> {
+  try {
+    const sender = parseSender(env.email.from);
+    const transport = await getSmtpTransport();
+    const info = await transport.sendMail({
+      from: sender.name ? { name: sender.name, address: sender.email } : sender.email,
+      to: opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text,
+    });
+    console.log(`[email:smtp] sent to ${opts.to} via ${env.email.smtp.host}:${env.email.smtp.port} (${info?.messageId ?? "no id"}) — view at http://localhost:8025`);
+    return { ok: true, provider: "smtp" };
+  } catch (err) {
+    return fail("smtp", opts.to, smtpErrorMessage(err));
+  }
+}
+
+// ---- Both: Mailpit copy + real delivery ------------------------------------
+
+// Reserved/non-routable TLDs (RFC 2606/6761): a real mail provider can never
+// deliver to them, so don't spend Brevo quota or create bounces on them.
+const UNDELIVERABLE_TLDS = new Set(["test", "example", "invalid", "localhost", "local"]);
+const isUndeliverable = (addr: string) => UNDELIVERABLE_TLDS.has(addr.split("@").pop()!.split(".").pop()!.toLowerCase());
+
+async function sendViaBoth(opts: SendEmailOpts): Promise<SendResult> {
+  const skipBrevo = isUndeliverable(opts.to);
+  const [local, real] = await Promise.all([
+    sendViaSmtp(opts),
+    skipBrevo ? Promise.resolve(null) : sendViaBrevo(opts),
+  ]);
+  if (skipBrevo) {
+    console.log(`[email:both] ${opts.to} is a reserved test address — delivered to Mailpit only (Brevo skipped).`);
+  }
+  const errors = [local, real].filter((r): r is SendResult => !!r && !r.ok).map((r) => `${r.provider}: ${r.error}`);
+  return errors.length
+    ? { ok: false, provider: "both", error: errors.join(" | ") }
+    : { ok: true, provider: "both" };
+}
+
+// ---- Production: Brevo HTTP API (unchanged behaviour) -----------------------
+
+async function sendViaBrevo(opts: SendEmailOpts): Promise<SendResult> {
+  if (!env.email.brevoApiKey) {
+    return fail("brevo", opts.to, "BREVO_API_KEY is not set. Set it, or choose EMAIL_PROVIDER=smtp (Mailpit) / console for local use.");
   }
   try {
     const res = await fetch("https://api.brevo.com/v3/smtp/email", {
@@ -83,14 +179,14 @@ export async function sendEmail(opts: SendEmailOpts) {
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      console.error(`[email] send failed: ${res.status} ${res.statusText} — ${body}`);
-      return;
+      return fail("brevo", opts.to, `Brevo rejected the request: ${res.status} ${res.statusText} — ${body}`);
     }
 
     const data = (await res.json()) as { messageId?: string };
     console.log("[email] sent:", data.messageId, "to", opts.to);
+    return { ok: true, provider: "brevo" };
   } catch (err) {
-    console.error("[email] send error:", err);
+    return fail("brevo", opts.to, `Could not reach Brevo: ${(err as Error)?.message ?? String(err)}`);
   }
 }
 

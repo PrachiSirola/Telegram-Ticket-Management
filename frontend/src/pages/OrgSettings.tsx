@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { isAdminOrAboveIn, isOrgSA, useAuth } from "../auth";
-import { useOrg } from "../org";
+import { canCreateOrg, isAdminOrAboveIn, isOrgSA, useAuth } from "../auth";
+import { forgetActiveOrg, useOrg } from "../org";
 import { Modal } from "../components/Modal";
 import { Dropdown } from "../components/Dropdown";
 
@@ -82,7 +82,7 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
   const del = useMutation({
     mutationFn: () => api.deleteOrg(orgId),
     onSuccess: async () => {
-      localStorage.removeItem("tm_active_org");
+      forgetActiveOrg(me?.id);
       await qc.invalidateQueries({ queryKey: ["orgs"] });
       await refresh();
       navigate("/");
@@ -134,6 +134,19 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
           </div>
         </div>
       </div>
+
+      {canCreateOrg(me) && (
+        <div className="card p-6" data-testid="new-org-card">
+          <div className="eyebrow mb-4">New organisation</div>
+          <p className="mb-3 text-sm text-fg-soft">
+            Set up another organisation with its own members, projects and tickets. You'll be its
+            Super Admin, and it will appear in the workspace switcher once you confirm by email.
+          </p>
+          <button className="btn btn-primary btn-sm" onClick={() => navigate("/create-org")}>
+            New organisation
+          </button>
+        </div>
+      )}
 
       {sa && (
       <div className="card p-6">

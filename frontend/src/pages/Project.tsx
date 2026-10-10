@@ -1,26 +1,32 @@
-import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { isAdminOrAboveIn, useAuth } from "../auth";
+import { isAdminOrAboveIn, isInternalIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
 import { Dropdown } from "../components/Dropdown";
+import { TablePagination } from "../components/TablePagination";
+import { useListParams } from "../lib/useListParams";
 import { Modal } from "../components/Modal";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { IconPlus, IconTrash } from "../components/Icons";
+import { FileDropzone, ProgressBar, StagedList, useStagedFiles } from "../components/FileDropzone";
+import { VisibilityPicker, type VisibilityValue } from "../components/VisibilityPicker";
+import { uploadErrorMessage, type RejectedFile } from "../lib/attachments";
 import {
   MentionTextarea,
   extractMentionIds,
   type MentionMember,
 } from "../components/MentionTextarea";
 import { matchWords } from "../lib/search";
-import type { Member, TicketPriority, TicketType } from "../types";
+import type { Member, TeamMember, TicketPriority, TicketType } from "../types";
 import { todayStr } from "../lib/dateUtils";
 
 const STATUS_OPTS = ["OPEN", "IN_PROGRESS", "DONE"];
 const PRIORITY_OPTS = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 const TYPE_OPTS = ["BUG", "FEATURE", "TASK"];
+const ARCHIVED_OPTS = ["archived", "all"];
 const opt = (v: string) => ({ value: v, label: v.replace("_", " ") });
 
 export default function Project() {
@@ -28,10 +34,19 @@ export default function Project() {
   const { me } = useAuth();
   const { activeOrgId } = useOrg();
   const qc = useQueryClient();
-  const [filters, setFilters] = useState<Record<string, string>>({});
+  const { filters, page, pageSize, setFilter, setPage, setPageSize, clearFilters } = useListParams({
+    filters: { status: STATUS_OPTS, priority: PRIORITY_OPTS, type: TYPE_OPTS, archived: ARCHIVED_OPTS },
+  });
+  const listTop = useRef<HTMLDivElement>(null);
   const [showForm, setShowForm] = useState(false);
   const [showAddMember, setShowAddMember] = useState(false);
   const [removingMember, setRemovingMember] = useState<Member | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<{
+    ticketId: string;
+    title: string;
+    message: string;
+    files?: RejectedFile[];
+  } | null>(null);
   const canManage = isAdminOrAboveIn(me, activeOrgId);
 
   const { data: projects } = useQuery({
@@ -42,24 +57,34 @@ export default function Project() {
   const project = projects?.find((p) => p.id === projectId);
 
   const activeFilters = Object.fromEntries(Object.entries(filters).filter(([, v]) => v));
-  const { data: tickets, isLoading } = useQuery({
-    queryKey: ["tickets", activeOrgId, projectId, activeFilters],
-    queryFn: () => api.tickets(activeOrgId, projectId, activeFilters),
+  const {
+    data: paged,
+    isLoading,
+    isFetching,
+    isPlaceholderData,
+    isError,
+    refetch,
+  } = useQuery({
+    queryKey: ["tickets", activeOrgId, projectId, activeFilters, page, pageSize],
+    queryFn: () => api.ticketsPaged(activeOrgId, projectId, { ...activeFilters, page, pageSize }),
     enabled: !!activeOrgId && !!projectId,
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === projectId ? prev : undefined),
   });
+  const tickets = paged?.items;
+  const hasFilters = Object.keys(activeFilters).length > 0;
+  useEffect(() => {
+    if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
+  }, [paged, isPlaceholderData, page, setPage]);
+
+  function goToPage(next: number) {
+    setPage(next);
+    listTop.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
   const { data: members } = useQuery({
     queryKey: ["projectMembers", activeOrgId, projectId],
     queryFn: () => api.projectMembers(activeOrgId, projectId),
     enabled: !!activeOrgId && !!projectId,
   });
-
-  // Removes a DEVELOPER/CLIENT from this project by re-PUTing the explicit
-  // attachment list with them left out — the same set/prune endpoints the
-  // Add Member flow uses, just with one membershipId excluded instead of
-  // added. Note: a developer who still has a ticket assigned in this
-  // project keeps implicit access (see lib/projectAccess.ts) and will
-  // still appear here even after this succeeds — reassign or close their
-  // ticket first if they need to fully lose access.
   const removeMember = useMutation({
     mutationFn: async (target: Member) => {
       const all = members ?? [];
@@ -80,10 +105,6 @@ export default function Project() {
       qc.invalidateQueries({ queryKey: ["projectMembers", activeOrgId, projectId] });
     },
   });
-
-  function setFilter(k: string, v: string) {
-    setFilters((f) => ({ ...f, [k]: v }));
-  }
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
@@ -108,11 +129,43 @@ export default function Project() {
             projectId={projectId}
             canAssign={canManage}
             members={members ?? []}
-            onCreated={() => {
+            internal={isInternalIn(me, activeOrgId)}
+            onCreated={(failed) => {
               setShowForm(false);
+              setUploadNotice(failed ?? null);
               qc.invalidateQueries({ queryKey: ["tickets", activeOrgId, projectId] });
+              qc.invalidateQueries({ queryKey: ["projects"] });
             }}
           />
+        )}
+
+        {uploadNotice && (
+          <div className="alert alert-danger mb-4 text-sm" role="alert" data-testid="create-upload-failed">
+            <div className="flex items-start justify-between gap-2">
+              <div className="font-medium">
+                Ticket “{uploadNotice.title}” was created, but its attachments weren't uploaded.
+              </div>
+              <button className="link shrink-0" onClick={() => setUploadNotice(null)}>
+                Dismiss
+              </button>
+            </div>
+            <div className="mt-1">{uploadNotice.message}</div>
+            {uploadNotice.files && (
+              <ul className="mt-1 list-disc pl-5 text-[13px]">
+                {uploadNotice.files.map((f, i) => (
+                  <li key={i}>
+                    <span className="font-medium">{f.name}</span>: {f.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="mt-1">
+              <Link className="link" to={`/tickets/${uploadNotice.ticketId}`}>
+                Open the ticket
+              </Link>{" "}
+              to add them again.
+            </div>
+          </div>
         )}
 
         <div className="mb-3 flex flex-wrap gap-2">
@@ -131,17 +184,71 @@ export default function Project() {
               options={[{ value: "", label: `All ${key}` }, ...opts.map(opt)]}
             />
           ))}
+          {isInternalIn(me, activeOrgId) && (
+            <Dropdown
+              className="w-44"
+              size="sm"
+              placeholder="Active tickets"
+              value={filters.archived ?? ""}
+              onChange={(v) => setFilter("archived", v)}
+              options={[
+                { value: "", label: "Active tickets" },
+                { value: "archived", label: "Archived only" },
+                { value: "all", label: "Active + archived" },
+              ]}
+            />
+          )}
         </div>
 
-        <div className="card divide-line overflow-hidden">
+        <div ref={listTop} className="scroll-mt-4" />
+        <div
+          className={`card divide-line overflow-hidden transition-opacity ${
+            isFetching && !isLoading ? "opacity-60" : ""
+          }`}
+          aria-busy={isFetching}
+        >
           {isLoading && <div className="p-6 text-sm text-muted">Loading…</div>}
+          {isError && !paged && (
+            <div className="p-10 text-center text-sm">
+              <p className="text-danger">Couldn't load tickets.</p>
+              <button className="btn btn-secondary btn-sm mt-3" onClick={() => refetch()}>
+                Try again
+              </button>
+            </div>
+          )}
           {tickets?.length === 0 && (
-            <div className="p-10 text-center text-sm text-muted">No tickets.</div>
+            <div className="p-10 text-center text-sm text-muted">
+              {hasFilters ? (
+                <>
+                  <p>
+                    {filters.archived === "archived"
+                      ? "No archived tickets match."
+                      : "No tickets match these filters."}
+                  </p>
+                  <button className="btn btn-secondary btn-sm mt-3" onClick={clearFilters}>
+                    Clear filters
+                  </button>
+                </>
+              ) : (
+                "No tickets."
+              )}
+            </div>
           )}
           {tickets?.map((t) => (
             <TicketRow key={t.id} ticket={t} />
           ))}
         </div>
+
+        {paged && (
+          <TablePagination
+            page={paged.page}
+            pageSize={paged.pageSize}
+            total={paged.total}
+            busy={isFetching}
+            onPageChange={goToPage}
+            onPageSizeChange={setPageSize}
+          />
+        )}
       </div>
 
       <aside className="space-y-4">
@@ -245,14 +352,6 @@ export default function Project() {
   );
 }
 
-/**
- * Lets SA/Admin attach an existing org DEVELOPER or CLIENT to this project —
- * the gap this fills: today, project attachment only happens at invite
- * time (see Members.tsx's InviteForm), so someone already in the org had no
- * way to be added to a project after the fact. Reuses the same
- * setProjectDevelopers/setProjectClients endpoints the invite flow relies
- * on, just called after the fact instead of during signup.
- */
 function AddMemberModal({
   orgId,
   projectId,
@@ -274,10 +373,6 @@ function AddMemberModal({
     queryFn: () => api.orgMembers(orgId),
     enabled: !!orgId,
   });
-
-  // Only devs/clients can be added this way — SA/Admin already see every
-  // project, and a disabled member can't be attached to new work. Anyone
-  // already on this project (by userId) is excluded from the picker.
   const currentUserIds = new Set(currentMembers.map((m) => m.userId));
   const candidates = (orgMembers ?? []).filter(
     (m) => !m.disabled && (m.role === "DEVELOPER" || m.role === "CLIENT") && !currentUserIds.has(m.userId),
@@ -331,11 +426,6 @@ function AddMemberModal({
               onChange={(e) => setQuery(e.target.value)}
             />
           )}
-          {/* Inline checklist, not a floating dropdown — a floating menu
-              would overlay the Cancel/Add buttons below it and, being
-              multi-select, never auto-closes after a pick. This scrolls
-              within its own fixed height instead, so the buttons always
-              stay visible and in normal document flow. */}
           <div className="max-h-56 overflow-y-auto rounded-xl border border-line">
             {visibleCandidates.length === 0 ? (
               <div className="px-3 py-3 text-sm text-muted">No matches</div>
@@ -397,13 +487,20 @@ function NewTicketForm({
   projectId,
   canAssign,
   members,
+  internal,
   onCreated,
 }: {
   orgId: string;
   projectId: string;
   canAssign: boolean;
-  members: { userId: string; name: string; role: string }[];
-  onCreated: () => void;
+  members: Member[];
+  internal: boolean;
+  onCreated: (uploadFailed?: {
+    ticketId: string;
+    title: string;
+    message: string;
+    files?: RejectedFile[];
+  }) => void;
 }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -412,10 +509,18 @@ function NewTicketForm({
   const [dueDate, setDueDate] = useState("");
   const [assigneeId, setAssigneeId] = useState("");
   const [picked, setPicked] = useState<MentionMember[]>([]);
+  const staged = useStagedFiles();
+  const [vis, setVis] = useState<VisibilityValue>({
+    visibility: internal ? "INTERNAL" : "CLIENT_VISIBLE",
+    selectedUserIds: [],
+  });
+  const [percent, setPercent] = useState(0);
+  const [phase, setPhase] = useState<"ticket" | "files">("ticket");
 
   const mut = useMutation({
-    mutationFn: () =>
-      api.createTicket(orgId, projectId, {
+    mutationFn: async () => {
+      setPhase("ticket");
+      const ticket = await api.createTicket(orgId, projectId, {
         title,
         description,
         type,
@@ -423,9 +528,33 @@ function NewTicketForm({
         dueDate: dueDate ? new Date(dueDate).toISOString() : null,
         assigneeId: assigneeId || null,
         mentions: extractMentionIds(description, picked),
-      }),
-    onSuccess: onCreated,
+      });
+      if (staged.files.length === 0) return { ticket, failed: undefined };
+      try {
+        setPhase("files");
+        setPercent(0);
+        await api.uploadAttachments(ticket.id, staged.files, {
+          visibility: vis.visibility,
+          selectedUserIds: vis.selectedUserIds,
+          onProgress: setPercent,
+        });
+        return { ticket, failed: undefined };
+      } catch (e) {
+        const { message, files } = uploadErrorMessage(e);
+        return { ticket, failed: { ticketId: ticket.id, title: ticket.title, message, files } };
+      }
+    },
+    onSuccess: ({ failed }) => onCreated(failed),
   });
+  const needsPeople = internal && vis.visibility === "SELECTED" && vis.selectedUserIds.length === 0;
+  const { me } = useAuth();
+  const pool: TeamMember[] = members.map((m) => ({
+    userId: m.userId,
+    name: m.name,
+    email: m.email,
+    avatarUrl: m.avatarUrl,
+    role: m.role,
+  }));
 
   const assignable = members.filter((m) => m.role !== "CLIENT");
   const mentionables: MentionMember[] = members.map((m) => ({ id: m.userId, name: m.name }));
@@ -481,9 +610,56 @@ function NewTicketForm({
           />
         )}
       </div>
-      <button disabled={!title || mut.isPending} onClick={() => mut.mutate()} className="btn btn-primary btn-sm">
-        Create ticket
+      <div className="mb-4" data-testid="create-attachments">
+        <div className="eyebrow mb-1.5">Attachments (optional)</div>
+        <FileDropzone onFiles={staged.add} disabled={mut.isPending} compact />
+        <StagedList
+          files={staged.files}
+          rejected={staged.rejected}
+          onRemove={staged.remove}
+          onDismissRejected={staged.dismissRejected}
+          disabled={mut.isPending}
+        />
+        {staged.files.length > 0 && internal && (
+          <div className="mt-3">
+            <div className="eyebrow mb-1.5">Who can see these files?</div>
+            <VisibilityPicker
+              value={vis}
+              onChange={setVis}
+              members={pool}
+              hideUserId={me?.id}
+              disabled={mut.isPending}
+            />
+          </div>
+        )}
+        {staged.files.length > 0 && !internal && (
+          <p className="mt-2 text-xs text-muted">These files will be visible to the project team.</p>
+        )}
+      </div>
+      {mut.isPending && staged.files.length > 0 && phase === "files" && (
+        <div className="mb-3">
+          <ProgressBar
+            percent={percent}
+            label={`Uploading ${staged.files.length} file${staged.files.length > 1 ? "s" : ""}…`}
+          />
+        </div>
+      )}
+      <button
+        disabled={!title || mut.isPending || needsPeople}
+        onClick={() => mut.mutate()}
+        className="btn btn-primary btn-sm"
+      >
+        {mut.isPending
+          ? phase === "files"
+            ? "Uploading files…"
+            : "Creating…"
+          : staged.files.length > 0
+            ? `Create ticket with ${staged.files.length} file${staged.files.length > 1 ? "s" : ""}`
+            : "Create ticket"}
       </button>
+      {needsPeople && (
+        <p className="mt-2 text-xs text-danger">Pick at least one member to share the files with.</p>
+      )}
       {mut.isError && <p className="mt-2 text-sm text-danger">Failed to create ticket.</p>}
     </div>
   );
