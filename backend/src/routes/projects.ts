@@ -7,7 +7,19 @@ import { isClient, membershipIn, orgRole, type AuthUser } from "../lib/access.js
 import { deleteTicketFiles } from "../lib/storage.js";
 import { developerVisibleProjectsWhere } from "../lib/projectAccess.js";
 export const projectsRouter = Router({ mergeParams: true });
-const OPEN_STATUSES = ["OPEN", "IN_PROGRESS"] as const;
+
+/**
+ * "New" / "Active" / "Closed" tabs, AND the ticketCount badge on a project
+ * card, are all derived live from ticket state — none of it is stored, so
+ * it can never go stale and flips automatically both ways as tickets move.
+ * Every project falls into exactly one of the three:
+ *   - New: has zero tickets yet.
+ *   - Active: has at least one OPEN or IN_PROGRESS ticket.
+ *   - Closed: has at least one ticket, and every ticket is DONE.
+ * ticketCount itself is the number of OPEN/IN_PROGRESS tickets (drops when
+ * a ticket closes, rises again when one's created or reopened).
+ */
+const OPEN_STATUSES: Array<"OPEN" | "IN_PROGRESS"> = ["OPEN", "IN_PROGRESS"];
 
 const projectSelect = {
   id: true,

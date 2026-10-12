@@ -16,9 +16,46 @@ import { ticketActionsRouter } from "./routes/ticketActions.js";
 
 export function createApp() {
   const app = express();
+<<<<<<< Updated upstream
   if (env.isProd) app.set("trust proxy", 1);
+=======
 
-  app.use(cors({ origin: env.frontendUrl, credentials: true }));
+  // Trust the first proxy hop (Render/nginx/Cloudflare) so Express sees the
+  // real client IP in X-Forwarded-For and req.secure reflects HTTPS.
+  app.set("trust proxy", 1);
+>>>>>>> Stashed changes
+
+  app.use(
+    cors({
+      origin(origin, callback) {
+        if (!origin) return callback(null, true);
+
+        if (env.frontendOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+
+        try {
+          const url = new URL(origin);
+          const normalizedHostname = url.hostname.replace(/^www\./, "");
+          const knownHostnames = new Set([
+            "ticketmanagement.site",
+            "localhost",
+            "127.0.0.1",
+            "[::1]",
+          ]);
+
+          if (knownHostnames.has(normalizedHostname)) {
+            return callback(null, true);
+          }
+        } catch {
+          // Ignore malformed origins and reject them below.
+        }
+
+        callback(new Error("Not allowed by CORS"));
+      },
+      credentials: true,
+    }),
+  );
   app.use(express.json());
   app.use(cookieParser());
   app.use(loadUser);

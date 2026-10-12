@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { getPrimaryNetworkAddress } from "./lib/network.js";
 
 function required(name: string, fallback?: string): string {
   const v = process.env[name] ?? fallback;
@@ -9,6 +10,29 @@ function required(name: string, fallback?: string): string {
 export type EmailProvider = "brevo" | "smtp" | "both" | "console";
 
 const brevoApiKey = process.env.BREVO_API_KEY ?? "";
+
+const defaultFrontendHost = process.env.FRONTEND_HOST ?? getPrimaryNetworkAddress() ?? "localhost";
+const defaultFrontendOrigin = `http://${defaultFrontendHost}`;
+
+const fixedFrontendOrigins = [
+  "https://ticketmanagement.site",
+  "https://www.ticketmanagement.site",
+  "http://localhost:5173",
+  defaultFrontendOrigin,
+];
+
+export function getCorsOrigins(value?: string, fallback = defaultFrontendOrigin): string[] {
+  const sources = (value ?? fallback)
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  // Prefer explicit sources (from FRONTEND_URL) first so deployments
+  // that set a custom origin (including non-standard ports) take priority
+  // over the built-in fixed list used for local dev/testing.
+  const uniqueOrigins = [...new Set([...sources, ...fixedFrontendOrigins])];
+  return uniqueOrigins.length > 0 ? uniqueOrigins : [fallback];
+}
 
 /**
  * Which transport sends email. Priority:
@@ -52,7 +76,8 @@ export const env = {
   // fallback below is a dev convenience only (matches this repo's dev
   // frontend port, see frontend/vite.config.ts) and should never be relied
   // on outside local development.
-  frontendUrl: process.env.FRONTEND_URL ?? "http://localhost:1020",
+  frontendUrl: getCorsOrigins(process.env.FRONTEND_URL, defaultFrontendOrigin)[0],
+  frontendOrigins: getCorsOrigins(process.env.FRONTEND_URL, defaultFrontendOrigin),
 
   // Transactional email (signup OTPs, invites, password resets).
   //   production : Brevo's HTTP API (Render blocks outbound SMTP ports on its
