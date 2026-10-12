@@ -16,7 +16,14 @@ import { ticketActionsRouter } from "./routes/ticketActions.js";
 
 export function createApp() {
   const app = express();
+<<<<<<< Updated upstream
   if (env.isProd) app.set("trust proxy", 1);
+=======
+
+  // Trust the first proxy hop (Render/nginx/Cloudflare) so Express sees the
+  // real client IP in X-Forwarded-For and req.secure reflects HTTPS.
+  app.set("trust proxy", 1);
+>>>>>>> Stashed changes
 
   app.use(
     cors({

@@ -16,7 +16,7 @@ describe("getNetworkAddresses", () => {
 });
 
 describe("getCorsOrigins", () => {
-  it("parses multiple comma-separated origins and keeps the configured frontend URL", () => {
+  it("parses multiple comma-separated origins and keeps the configured frontend URL without forcing a port", () => {
     const origins = getCorsOrigins(
       "https://ticketmanagement.site, https://www.ticketmanagement.site, http://localhost:1020, https://backend.ticketmanagement.site:1019",
       "https://ticketmanagement.site",
@@ -25,8 +25,6 @@ describe("getCorsOrigins", () => {
     assert.deepEqual(origins, [
       "https://ticketmanagement.site",
       "https://www.ticketmanagement.site",
-      "https://ticketmanagement.site:1020",
-      "https://www.ticketmanagement.site:1020",
       "http://localhost:1020",
       "http://localhost:5173",
       "https://localhost:1020",

@@ -12,16 +12,12 @@ export type EmailProvider = "brevo" | "smtp" | "both" | "console";
 const brevoApiKey = process.env.BREVO_API_KEY ?? "";
 
 const defaultFrontendHost = process.env.FRONTEND_HOST ?? getPrimaryNetworkAddress() ?? "localhost";
-const defaultFrontendOrigin = `http://${defaultFrontendHost}:1020`;
+const defaultFrontendOrigin = `http://${defaultFrontendHost}`;
 
 const fixedFrontendOrigins = [
   "https://ticketmanagement.site",
   "https://www.ticketmanagement.site",
-  "https://ticketmanagement.site:1020",
-  "https://www.ticketmanagement.site:1020",
-  "http://localhost:1020",
   "http://localhost:5173",
-  "https://localhost:1020",
   defaultFrontendOrigin,
 ];
 
@@ -31,7 +27,10 @@ export function getCorsOrigins(value?: string, fallback = defaultFrontendOrigin)
     .map((origin) => origin.trim())
     .filter(Boolean);
 
-  const uniqueOrigins = [...new Set([...fixedFrontendOrigins, ...sources])];
+  // Prefer explicit sources (from FRONTEND_URL) first so deployments
+  // that set a custom origin (including non-standard ports) take priority
+  // over the built-in fixed list used for local dev/testing.
+  const uniqueOrigins = [...new Set([...sources, ...fixedFrontendOrigins])];
   return uniqueOrigins.length > 0 ? uniqueOrigins : [fallback];
 }
 

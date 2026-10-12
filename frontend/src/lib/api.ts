@@ -31,7 +31,7 @@ import type {
 
 const defaultBaseURL =
   typeof window !== "undefined"
-    ? `http://${window.location.hostname === "localhost" ? "localhost" : window.location.hostname}:1019`
+    ? `${window.location.protocol}//${window.location.hostname}:1019`
     : "http://localhost:1019";
 
 const baseURL = import.meta.env.VITE_API_URL ?? defaultBaseURL;
