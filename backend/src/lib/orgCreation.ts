@@ -20,14 +20,6 @@ export class InvalidOrgCreationTokenError extends Error {
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
-
-/**
- * Step 1: gate on "is a Super Admin of some organisation", stash the requested org
- * name behind an emailed confirmation token. Nothing is created yet — the
- * org only materialises once the link is clicked (see verifyAndCreateOrg).
- * Any previous outstanding request from this user is superseded (not
- * required to be consumed) so retries after a lost email just work.
- */
 export async function requestOrgCreation(
   user: AuthUser,
   orgNameRaw: string,
@@ -46,13 +38,6 @@ export async function requestOrgCreation(
   });
   return { token };
 }
-
-/**
- * Step 2: consumes the emailed link and actually creates the organisation +
- * the requester's SUPER_ADMIN membership, in one transaction. Re-checks the
- * platform-admin gate against fresh data — covers the edge case where the
- * requester's platform access was revoked between request and click.
- */
 export async function verifyAndCreateOrg(
   token: string,
   confirmingUserId: string,
@@ -64,7 +49,6 @@ export async function verifyAndCreateOrg(
   if (!record || record.verifiedAt || record.createdOrgId || record.expiresAt < new Date()) {
     throw new InvalidOrgCreationTokenError();
   }
-  // The link is only good for the person who asked for it (a leaked link alone isn't enough).
   if (record.requestedById !== confirmingUserId) throw new InvalidOrgCreationTokenError();
   if (!canCreateOrganisation(record.requestedBy)) throw new NotPlatformAdminError();
 

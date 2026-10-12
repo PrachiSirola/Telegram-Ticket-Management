@@ -21,6 +21,8 @@ export function createApp() {
   app.use(cors({ origin: env.frontendUrl, credentials: true }));
   app.use(express.json());
   app.use(cookieParser());
+
+  // Attach req.user (if logged in) to every request.
   app.use(loadUser);
 
   app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -38,6 +40,8 @@ export function createApp() {
   app.use("/tickets/:id/attachments", attachmentsRouter);
   app.use("/tickets/:id", ticketActionsRouter);
   app.use("/attachments", attachmentFileRouter);
+
+  // Central error handler.
   app.use(
     (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       console.error("[error]", err);

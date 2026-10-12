@@ -132,6 +132,7 @@ model User {
   platformRole         PlatformRole?
   platformAdminActive  Boolean       @default(true)
   passwordHistory PasswordHistory[]
+  pinHistory      PinHistory[]
     twoFactorEnabled Boolean          @default(false)
   twoFactorMethod  TwoFactorMethod?
   pinHash          String?
@@ -328,6 +329,19 @@ model PasswordHistory {
   userId       String
   passwordHash String
   createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// Archive of a user's previous PIN hashes (bcrypt), used to block reuse — same
+// design as PasswordHistory. The CURRENT PIN lives on User.pinHash.
+model PinHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  pinHash   String
+  createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

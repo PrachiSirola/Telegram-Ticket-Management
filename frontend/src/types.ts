@@ -4,23 +4,18 @@ export type TicketStatus = "OPEN" | "IN_PROGRESS" | "DONE";
 export type TicketPriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
 export type TicketType = "BUG" | "FEATURE" | "TASK";
 export type CommentVisibility = "INTERNAL" | "CLIENT_VISIBLE";
-/** Attachments add "Selected Members" on top of the comment visibilities. */
 export type AttachmentVisibility = "INTERNAL" | "CLIENT_VISIBLE" | "SELECTED";
 
-export type WorkRange = "current" | "today" | "week" | "prev_week" | "month" | "prev_month" | "custom";
+export type WorkRange = "all" | "today" | "last_24h" | "last_3d" | "last_7d" | "last_1m" | "last_1y" | "custom";
 export type WorkStatusFilter = "all" | "pending" | "in_progress" | "completed" | "overdue";
-/** undefined = "All" (every non-archived project); "current" = New + Active (the Dashboard default). */
 export type ProjectStatusFilter = "current" | "new" | "active" | "closed" | "archived" | undefined;
 
-/** Envelope shape for opt-in server-side pagination (projects, org members). */
 export interface Paged<T> {
   items: T[];
   total: number;
   page: number;
   pageSize: number;
 }
-
-/** Ticket lists: the generic envelope plus the extra metadata the ticket endpoints send. */
 export interface TicketPage<T> extends Paged<T> {
   totalPages: number;
   hasNext: boolean;
@@ -50,7 +45,6 @@ export interface Me {
 export interface Organization {
   id: string;
   name: string;
-  /** IANA timezone that decides what "today" means for this organisation. */
   timezone: string;
   role: OrgRole;
 }
@@ -59,7 +53,7 @@ export interface OrgSettings {
   id: string;
   name: string;
   timezone: string;
-  telegramBotToken: string | null; // masked by the API
+  telegramBotToken: string | null; 
   telegramChatId: string | null;
   telegramConfigured: boolean;
 }
@@ -70,11 +64,8 @@ export interface Project {
   description: string;
   ticketCount: number;
   createdAt: string;
-  /** Set when the project is archived (hidden from lists, read-only). */
   archivedAt?: string | null;
 }
-
-/** What deleting a project would remove (shown in the delete dialog). */
 export interface ProjectImpact {
   tickets: number;
   comments: number;
@@ -107,7 +98,6 @@ export interface BulkInviteResult {
   email: string;
   status: "invited" | "skipped" | "invalid";
   reason?: string;
-  /** invited only: whether the email went out (the invite + link exist either way). */
   emailSent?: boolean;
   inviteUrl?: string;
 }
@@ -153,9 +143,7 @@ export interface Ticket {
   estimate: number | null;
   assignee: UserLite | null;
   reporter: UserLite | null;
-  /** Set when the ticket is archived (hidden from lists + customers, restorable). */
   archivedAt?: string | null;
-  /** Only on GET /tickets/:id — what the signed-in user may do (enforced again by the API). */
   can?: TicketPermissions;
   following?: boolean;
   followerCount?: number;
@@ -285,4 +273,6 @@ export interface MyWorkResponse {
   summary: MyWorkSummary;
   work: Paged<Ticket>;
   completedWork: Paged<CompletedTicket>;
+  /** The resolved window (org timezone) the server applied. */
+  window?: { range: WorkRange; fromDay: string | null; toDay: string | null; timezone: string };
 }

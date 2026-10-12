@@ -7,25 +7,16 @@ interface NotifyOpts {
   recipientIds: string[];
   type: NotificationType;
   ticket: { id: string; title: string; projectId: string };
-  orgId: string; // the ticket's org — scopes recipients + telegram config
-  actorId: string; // who triggered it (excluded from recipients)
-  message: string; // human-readable line for in-app payload + Telegram
-  telegram?: boolean; // also post to the org's Telegram chat (default false)
-  telegramMessage?: string; // Telegram-specific wording (falls back to message)
+  orgId: string; 
+  actorId: string; 
+  message: string; 
+  telegram?: boolean; 
+  telegramMessage?: string; 
 }
-
-/** Join names for prose: "A", "A and B", "A, B and C". */
 export function listNames(names: string[]) {
   if (names.length <= 1) return names[0] ?? "";
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
-
-/**
- * Create in-app notifications for recipients and, when telegram=true, post the
- * message to the org's Telegram chat. Recipients are filtered to ACTIVE
- * members of the org; CLIENT members must additionally be attached to the
- * ticket's project (a stale mention must never link someone to a 404).
- */
 export async function notify(opts: NotifyOpts) {
   const candidates = [...new Set(opts.recipientIds)].filter(
     (id) => id && id !== opts.actorId,

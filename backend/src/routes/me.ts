@@ -4,23 +4,22 @@ import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { canAccessOrg, isClient, membershipIn, orgRole } from "../lib/access.js";
 import {
-  hashPassword,
   passwordContainsIdentityError,
   passwordStrengthError,
   PasswordPolicyError,
   verifyPassword,
 } from "../lib/password.js";
-import { assertPasswordNotReused, recordPasswordHistory } from "../lib/passwordHistory.js";
+import { changePasswordWithHistory } from "../lib/credentialHistory.js";
 import { passwordChangedEmail, sendEmail } from "../lib/email.js";
 import { developerVisibleProjectsWhere } from "../lib/projectAccess.js";
-import { resolveWorkRange, type WorkRange } from "../lib/dateRanges.js";
+import { dueDateFilter, isValidYmd, resolveWorkRange, ymdInZone, WORK_RANGES, type WorkRange } from "../lib/dateRanges.js";
 import {
   countCompletedInRange,
   fetchCompletedWork,
   serializeTicket,
   workTicketInclude,
 } from "../lib/myWork.js";
-import { setPin, pinFormatError } from "../lib/twoFactor.js";
+import { setPin, pinFormatError, PinReuseError } from "../lib/twoFactor.js";
 import {
   paginate,
   parsePageParams,
@@ -31,8 +30,6 @@ import {
 export const meRouter = Router();
 
 const userSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
-
-// --- Profile ---
 
 const profileSchema = z.object({ name: z.string().min(1).max(100) });
 
@@ -60,7 +57,6 @@ meRouter.post("/change-password", requireAuth, async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
   }
-  // Reload with the hash (req.user's shape may not carry it forward).
   const current = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
   const ok = await verifyPassword(parsed.data.currentPassword, current.passwordHash);
   if (!ok) return res.status(400).json({ error: "Current password is incorrect." });
@@ -69,24 +65,34 @@ meRouter.post("/change-password", requireAuth, async (req, res) => {
   if (identityErr) return res.status(400).json({ error: identityErr });
 
   try {
-    await assertPasswordNotReused(current.id, current.passwordHash, parsed.data.newPassword);
+    await changePasswordWithHistory(current.id, parsed.data.newPassword, {
+      verify: async (_tx, locked) => {
+        if (!(await verifyPassword(parsed.data.currentPassword, locked.passwordHash))) {
+          throw new PasswordPolicyError("Current password is incorrect.");
+        }
+      },
+    });
   } catch (err) {
     if (err instanceof PasswordPolicyError) return res.status(400).json({ error: err.message });
     throw err;
   }
-
-  await prisma.user.update({
-    where: { id: current.id },
-    data: { passwordHash: await hashPassword(parsed.data.newPassword) },
-  });
-  await recordPasswordHistory(current.id, current.passwordHash);
-  // Send confirmation email (fire-and-forget)
   const mail = passwordChangedEmail(current.name);
   sendEmail({ ...mail, to: current.email });
   res.json({ ok: true });
 });
 
-// --- "My Tickets" dashboard, scoped to one org. ?filter=assigned | reported ---
+const emptyToUndef = (v: unknown) => (v === "" ? undefined : v);
+const ymd = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((d) => !Number.isNaN(Date.parse(`${d}T00:00:00Z`)) && new Date(`${d}T00:00:00Z`).toISOString().startsWith(d));
+const myTicketsFilterSchema = z.object({
+  status: z.preprocess(emptyToUndef, z.enum(["OPEN", "IN_PROGRESS", "DONE"]).optional()),
+  priority: z.preprocess(emptyToUndef, z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional()),
+  dueFrom: z.preprocess(emptyToUndef, ymd.optional()),
+  dueTo: z.preprocess(emptyToUndef, ymd.optional()),
+});
+
 meRouter.get("/tickets", requireAuth, async (req, res) => {
   const user = req.user!;
   const orgId = String(req.query.orgId ?? "");
@@ -95,7 +101,6 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
     return res.status(404).json({ error: "Organisation not found" });
   }
 
-  // Clients only see tickets in projects they're attached to.
   const projectScope = isClient(user, orgId)
     ? {
         project: {
@@ -108,14 +113,31 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
 
   const who = filter === "reported" ? { reporterId: user.id } : { assigneeId: user.id };
 
-  const where = { ...projectScope, ...who, archivedAt: null };
+  const filters = myTicketsFilterSchema.safeParse(req.query);
+  if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
+  const { status, priority, dueFrom, dueTo } = filters.data;
+  if (dueFrom && dueTo && dueFrom > dueTo) {
+    return res.status(400).json({ error: "The 'from' date must be on or before the 'to' date." });
+  }
+  const dueRange = {
+    ...(dueFrom ? { gte: new Date(`${dueFrom}T00:00:00Z`) } : {}),
+    ...(dueTo ? { lt: new Date(Date.parse(`${dueTo}T00:00:00Z`) + 24 * 60 * 60 * 1000) } : {}),
+  };
+
+  const where = {
+    ...projectScope,
+    ...who,
+    archivedAt: null,
+    ...(status ? { status } : {}),
+    ...(priority ? { priority } : {}),
+    ...(dueFrom || dueTo ? { dueDate: dueRange } : {}),
+  };
   const include = {
     assignee: userSelect,
     reporter: userSelect,
     project: { select: { id: true, name: true, orgId: true } },
   };
-  // dueDate / updatedAt both tie often; `id` makes the order total so pages
-  // never overlap or skip tickets.
+
   const orderBy = [
     { dueDate: "asc" as const },
     { updatedAt: "desc" as const },
@@ -127,7 +149,6 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
     project: { id: t.project.id, name: t.project.name },
   });
 
-  // Opt-in pagination: no `page` → the plain array as before.
   if (!wantsPagination(req.query)) {
     const tickets = await prisma.ticket.findMany({ where, include, orderBy });
     return res.json(tickets.map(shape));
@@ -141,27 +162,6 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
   res.json({ ...paged, items: paged.items.map(shape) });
 });
 
-/**
- * "My Work" — a personal work view, primarily for Developers (see
- * frontend's Sidebar, which only surfaces this to that role), but written
- * generically enough to be safe for any role: project visibility follows
- * the exact same rules used everywhere else in the app (SA/Admin see
- * everything in the org, clients only their attached projects, developers
- * only projects they're explicitly assigned to or have a ticket in — see
- * lib/projectAccess.ts). The authenticated user (req.user) is always the
- * subject — there is no way to pass a different userId in; this route only
- * ever returns the caller's own work.
- *
- * Query params:
- *   orgId          required
- *   range          current | today | week | prev_week | month | prev_month | custom (default: current)
- *   from, to       ISO dates, only used when range=custom
- *   status         all | pending | in_progress | completed | overdue (default: all) — filters the main table only
- *   projectId      optional — narrows to one project (still subject to the visibility rules above)
- *   q              optional — case-insensitive search over title + description, applied to BOTH tables
- *   page, pageSize           — main "My Work" table (default pageSize 15)
- *   completedPage, completedPageSize — "Completed Work" table (default pageSize 15, paginated independently)
- */
 meRouter.get("/work", requireAuth, async (req, res) => {
   const user = req.user!;
   const orgId = String(req.query.orgId ?? "");
@@ -169,15 +169,25 @@ meRouter.get("/work", requireAuth, async (req, res) => {
     return res.status(404).json({ error: "Organisation not found" });
   }
 
-  const range = (["current", "today", "week", "prev_week", "month", "prev_month", "custom"] as const).includes(
-    req.query.range as WorkRange,
-  )
-    ? (req.query.range as WorkRange)
-    : "current";
-  const window = resolveWorkRange(range, {
-    from: req.query.from as string | undefined,
-    to: req.query.to as string | undefined,
-  });
+  const rawRange = req.query.range === "current" ? "all" : req.query.range;
+  const range: WorkRange = WORK_RANGES.includes(rawRange as WorkRange) ? (rawRange as WorkRange) : "all";
+  const from = req.query.from ? String(req.query.from) : undefined;
+  const to = req.query.to ? String(req.query.to) : undefined;
+  if (range === "custom") {
+    if ((from && !isValidYmd(from)) || (to && !isValidYmd(to))) {
+      return res.status(400).json({ error: "Dates must be valid yyyy-mm-dd values." });
+    }
+    if (from && to && from > to) {
+      return res.status(400).json({ error: "The start date must be on or before the end date." });
+    }
+  }
+  const priorityParam = req.query.priority ? String(req.query.priority) : undefined;
+  if (priorityParam && !["LOW", "MEDIUM", "HIGH", "URGENT"].includes(priorityParam)) {
+    return res.status(400).json({ error: "Invalid priority" });
+  }
+  const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { timezone: true } });
+  const timezone = org?.timezone ?? "UTC";
+  const window = resolveWorkRange(range, { from, to }, timezone);
 
   const statusFilter = String(req.query.status ?? "all");
   const projectId = req.query.projectId ? String(req.query.projectId) : undefined;
@@ -191,49 +201,37 @@ meRouter.get("/work", requireAuth, async (req, res) => {
     Math.max(1, parseInt(String(req.query.completedPageSize ?? "15"), 10) || 15),
   );
 
-  // Project visibility scope — identical rule set used across the app.
   let projectScope: Record<string, unknown> = {};
   if (isClient(user, orgId)) {
     projectScope = { clients: { some: { membershipId: membershipIn(user, orgId)!.id } } };
   } else if (orgRole(user, orgId) === "DEVELOPER") {
     projectScope = developerVisibleProjectsWhere(user.id, membershipIn(user, orgId)!.id);
   }
-  // SA/Admin: no extra scope — they already see every project in the org.
   if (projectId) projectScope = { ...projectScope, id: projectId };
-  // Tickets of archived projects stay out of My Work until the project is restored.
   projectScope = { ...projectScope, archivedAt: null };
 
-  const now = new Date();
-  const searchWhere = q
-    ? {
-        OR: [
-          { title: { contains: q, mode: "insensitive" as const } },
-          { description: { contains: q, mode: "insensitive" as const } },
-        ],
-      }
-    : {};
-  const rangeStart = window.start;
-  const rangeEnd = window.end;
-  const dueDateWhere = rangeStart && rangeEnd ? { dueDate: { gte: rangeStart, lte: rangeEnd } } : {};
-
-  // Base scope shared by the summary cards and the main table: this user's
-  // assigned tickets, in visible projects, matching search — and, for every
-  // range except "current" (which has no date bound), due within the range.
+  const overdueBefore = new Date(`${ymdInZone(new Date(), timezone)}T00:00:00Z`);
+  const searchWhere = {
+    ...(q
+      ? {
+          OR: [
+            { title: { contains: q, mode: "insensitive" as const } },
+            { description: { contains: q, mode: "insensitive" as const } },
+          ],
+        }
+      : {}),
+    ...(priorityParam ? { priority: priorityParam } : {}),
+  };
+  const dueDateWhere = dueDateFilter(window);
   const baseWhere = {
     assigneeId: user.id,
     archivedAt: null,
     project: { orgId, ...projectScope },
     ...searchWhere,
-    ...(range === "current" ? {} : dueDateWhere),
+    ...dueDateWhere,
   };
 
-  const completedScope = { orgId, userId: user.id, projectScope, searchWhere, window, range };
-
-  // --- Summary cards ---
-  // "Overdue" is deliberately an absolute, range-independent count (not-DONE
-  // + due in the past) — the single most actionable number regardless of
-  // which historical range the user happens to be browsing. Every other
-  // card follows whatever range is currently selected.
+  const completedScope = { orgId, userId: user.id, projectScope, searchWhere, window };
   const [assignedCount, inProgressCount, overdueCount, completedCount] = await Promise.all([
     prisma.ticket.count({ where: baseWhere as any }),
     prisma.ticket.count({ where: { ...baseWhere, status: "IN_PROGRESS" } as any }),
@@ -244,33 +242,39 @@ meRouter.get("/work", requireAuth, async (req, res) => {
         project: { orgId, ...projectScope },
         ...searchWhere,
         status: { not: "DONE" },
-        dueDate: { lt: now },
+        dueDate: { lt: overdueBefore },
       } as any,
     }),
     countCompletedInRange(completedScope),
   ]);
 
-  // --- Main "My Work" table — status tab narrows this table only. ---
   let statusWhere: Record<string, unknown> = {};
   if (statusFilter === "pending") statusWhere = { status: "OPEN" };
   else if (statusFilter === "in_progress") statusWhere = { status: "IN_PROGRESS" };
   else if (statusFilter === "completed") statusWhere = { status: "DONE" };
-  else if (statusFilter === "overdue") statusWhere = { status: { not: "DONE" }, dueDate: { lt: now } };
+  else if (statusFilter === "overdue") statusWhere = { status: { not: "DONE" }, dueDate: { lt: overdueBefore } };
 
-  const workWhere = { ...baseWhere, ...statusWhere };
-  const [workItems, workTotal] = await prisma.$transaction([
-    prisma.ticket.findMany({
-      where: workWhere as any,
-      include: workTicketInclude,
-      orderBy: [{ dueDate: "asc" }, { updatedAt: "desc" }],
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    }),
-    prisma.ticket.count({ where: workWhere as any }),
-  ]);
-
-  // --- "Completed Work" table — always DONE, always date-filtered by actual
-  // completion date (not the status tabs above; it's an independent section). ---
+  let work: { items: unknown[]; total: number; page: number; pageSize: number };
+  if (statusFilter === "completed") {
+    work = await fetchCompletedWork({ ...completedScope, page, pageSize });
+  } else {
+    const { dueDate: _ignored, ...baseNoDue } = baseWhere as any;
+    const workWhere =
+      statusFilter === "overdue"
+        ? { ...baseNoDue, ...statusWhere }
+        : { ...baseWhere, ...statusWhere };
+    const [workItems, workTotal] = await prisma.$transaction([
+      prisma.ticket.findMany({
+        where: workWhere as any,
+        include: workTicketInclude,
+        orderBy: [{ dueDate: "asc" }, { updatedAt: "desc" }, TICKET_TIEBREAK],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.ticket.count({ where: workWhere as any }),
+    ]);
+    work = { items: workItems.map(serializeTicket), total: workTotal, page, pageSize };
+  }
   const completedWork = await fetchCompletedWork({
     ...completedScope,
     page: completedPage,
@@ -284,12 +288,12 @@ meRouter.get("/work", requireAuth, async (req, res) => {
       completed: completedCount,
       overdue: overdueCount,
     },
-    work: { items: workItems.map(serializeTicket), total: workTotal, page, pageSize },
+    work,
     completedWork,
+    window: { range, fromDay: window.fromDay, toDay: window.toDay, timezone },
   });
 });
 
-// --- In-app notification feed (global across orgs) ---
 meRouter.get("/notifications", requireAuth, async (req, res) => {
   const notifications = await prisma.notification.findMany({
     where: { userId: req.user!.id },
@@ -323,7 +327,6 @@ meRouter.get("/notifications", requireAuth, async (req, res) => {
 });
 
 meRouter.post("/notifications/:id/read", requireAuth, async (req, res) => {
-  // Scope by userId so a user can't mark someone else's notification read.
   await prisma.notification.updateMany({
     where: { id: req.params.id, userId: req.user!.id },
     data: { isRead: true },
@@ -375,7 +378,13 @@ meRouter.post("/2fa/pin", requireAuth, async (req, res) => {
   const identityErr = passwordContainsIdentityError(pin, current.email, current.name);
   if (identityErr) return res.status(400).json({ error: "PIN can't contain your name or email." });
 
-  await setPin(current.id, pin);
+  try {
+    // Rejects the current PIN and the previous one (3 most recent); atomic under a user lock.
+    await setPin(current.id, pin);
+  } catch (err) {
+    if (err instanceof PinReuseError) return res.status(400).json({ error: err.message });
+    throw err;
+  }
   res.json({ ok: true });
 });
 

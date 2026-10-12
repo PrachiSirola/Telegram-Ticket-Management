@@ -327,7 +327,16 @@ export const api = {
   myTicketsPaged: (
     orgId: string,
     filter: "assigned" | "reported",
-    params: { page: number; pageSize: number },
+    params: {
+      page: number;
+      pageSize: number;
+      /** Omit for every status. */
+      status?: TicketStatus;
+      priority?: TicketPriority;
+      /** Inclusive due-date range, yyyy-mm-dd. */
+      dueFrom?: string;
+      dueTo?: string;
+    },
   ) =>
     http
       .get<TicketPage<Ticket>>("/me/tickets", { params: { orgId, filter, ...params } })
@@ -339,6 +348,7 @@ export const api = {
       from?: string;
       to?: string;
       status?: WorkStatusFilter;
+      priority?: TicketPriority;
       projectId?: string;
       q?: string;
       page: number;

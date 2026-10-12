@@ -16,7 +16,7 @@ export function PinCard() {
     setBusy(true);
     try {
       await api.setPin({ currentPassword, pin, confirmPin });
-      toast.success("Your 2FA PIN was set. Use it the next time you sign in.");
+      toast.success("Your passkey has been registered successfully. Use it the next time you sign in.");
       setCurrentPassword("");
       setPin("");
       setConfirmPin("");

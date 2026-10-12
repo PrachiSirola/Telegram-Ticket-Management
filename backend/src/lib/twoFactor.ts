@@ -1,11 +1,14 @@
 import bcrypt from "bcryptjs";
 import { createHash, randomBytes } from "node:crypto";
+import type { User } from "@prisma/client";
 import { prisma } from "../prisma.js";
+import { HISTORY_ROWS_KEPT, HISTORY_TX_OPTIONS, PIN_REUSE_MESSAGE, lockUserRow, type Tx } from "./credentialHistory.js";
+import { isPasswordRecentlyUsed } from "./password.js";
 
 const SALT_ROUNDS = 12;
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
-const PIN_RESET_TTL_MS = 60 * 60 * 1000; // 1 hour, same as password reset
+const PIN_RESET_TTL_MS = 60 * 60 * 1000; 
 const PIN_RE = /^\d{6}$/;
 const WEAK_PINS = new Set(["000000", "111111", "123456", "121212", "654321", "112233"]);
 
@@ -14,13 +17,16 @@ export class InvalidPinError extends Error {
     super(message);
   }
 }
+export class PinReuseError extends Error {
+  constructor(message = PIN_REUSE_MESSAGE) {
+    super(message);
+  }
+}
 export class PinLockedError extends Error {
   constructor() {
     super("Too many incorrect attempts. Try again in a few minutes.");
   }
 }
-
-/** Returns a user-facing error message if the PIN is unusable, else null. */
 export function pinFormatError(pin: string): string | null {
   if (!PIN_RE.test(pin)) return "PIN must be exactly 6 digits.";
   if (WEAK_PINS.has(pin)) return "This PIN is too common. Choose another.";
@@ -32,18 +38,41 @@ export function hashPin(pin: string): Promise<string> {
   return bcrypt.hash(pin, SALT_ROUNDS);
 }
 
-/** Sets/replaces the user's PIN. Does not touch twoFactorEnabled/twoFactorMethod. */
-export async function setPin(userId: string, pin: string): Promise<void> {
-  await prisma.user.update({
-    where: { id: userId },
-    data: { pinHash: await hashPin(pin), pinAttempts: 0, pinLockedUntil: null },
-  });
+export interface PinChangeHooks {
+  verify?: (tx: Tx, user: User) => Promise<void>;
+  after?: (tx: Tx) => Promise<void>;
+}
+export async function changePinWithHistory(userId: string, pin: string, hooks: PinChangeHooks = {}): Promise<void> {
+  const newHash = await hashPin(pin); 
+  await prisma.$transaction(async (tx) => {
+    await lockUserRow(tx, userId);
+    const user = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+    await hooks.verify?.(tx, user);
+
+    const history = await tx.pinHistory.findMany({
+      where: { userId },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: HISTORY_ROWS_KEPT,
+      select: { pinHash: true },
+    });
+    const recent = [...(user.pinHash ? [user.pinHash] : []), ...history.map((h) => h.pinHash)];
+    if (await isPasswordRecentlyUsed(pin, recent)) throw new PinReuseError();
+
+    await tx.user.update({ where: { id: userId }, data: { pinHash: newHash, pinAttempts: 0, pinLockedUntil: null } });
+    if (user.pinHash) await tx.pinHistory.create({ data: { userId, pinHash: user.pinHash } });
+    const stale = await tx.pinHistory.findMany({
+      where: { userId },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: HISTORY_ROWS_KEPT,
+      select: { id: true },
+    });
+    if (stale.length) await tx.pinHistory.deleteMany({ where: { id: { in: stale.map((x) => x.id) } } });
+
+    await hooks.after?.(tx);
+  }, HISTORY_TX_OPTIONS);
 }
 
-/**
- * Verifies a PIN during login's second factor. Throws PinLockedError while
- * locked out, InvalidPinError on a wrong PIN (and records the attempt).
- */
+export const setPin = (userId: string, pin: string) => changePinWithHistory(userId, pin);
 export async function verifyPin(userId: string, candidate: string): Promise<void> {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
 
@@ -71,21 +100,9 @@ export async function verifyPin(userId: string, candidate: string): Promise<void
   }
 }
 
-// ---------------------------------------------------------------------------
-// Forgot PIN — same shape as password reset (lib/login.ts), just its own
-// token table so a PIN reset link can never be replayed as a password reset
-// link or vice versa.
-// ---------------------------------------------------------------------------
-
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
-
-/**
- * Issues a PIN-reset token for `userId`. Callers MUST have already verified
- * the password for this exact user (i.e. only call this from the 2FA-pending
- * step of login) — this function itself does no re-authentication.
- */
 export async function createPinResetToken(userId: string): Promise<string> {
   const token = randomBytes(32).toString("hex");
   await prisma.pinResetToken.create({
@@ -98,7 +115,6 @@ export async function createPinResetToken(userId: string): Promise<string> {
   return token;
 }
 
-/** Consumes a PIN-reset token and sets a new PIN. Throws on invalid/expired/used token. */
 export async function resetPinWithToken(token: string, newPin: string): Promise<void> {
   const record = await prisma.pinResetToken.findUnique({ where: { tokenHash: hashToken(token) } });
   if (!record || record.usedAt || record.expiresAt < new Date()) {
@@ -108,15 +124,19 @@ export async function resetPinWithToken(token: string, newPin: string): Promise<
   const formatErr = pinFormatError(newPin);
   if (formatErr) throw new InvalidPinError(formatErr);
 
-  await prisma.$transaction([
-    prisma.user.update({
-      where: { id: record.userId },
-      data: { pinHash: await hashPin(newPin), pinAttempts: 0, pinLockedUntil: null },
-    }),
-    prisma.pinResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
-    prisma.pinResetToken.updateMany({
-      where: { userId: record.userId, usedAt: null, id: { not: record.id } },
-      data: { usedAt: new Date() },
-    }),
-  ]);
+  await changePinWithHistory(record.userId, newPin, {
+    verify: async (tx) => {
+      const fresh = await tx.pinResetToken.findUnique({ where: { id: record.id } });
+      if (!fresh || fresh.usedAt || fresh.expiresAt < new Date()) {
+        throw new Error("This reset link is invalid or has expired.");
+      }
+    },
+    after: async (tx) => {
+      await tx.pinResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } });
+      await tx.pinResetToken.updateMany({
+        where: { userId: record.userId, usedAt: null, id: { not: record.id } },
+        data: { usedAt: new Date() },
+      });
+    },
+  });
 }

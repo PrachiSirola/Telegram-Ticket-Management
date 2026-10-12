@@ -1,48 +1,10 @@
 import { env, type EmailProvider } from "../env.js";
-
-/*
-  Email delivery via Brevo's HTTP API.
-
-  History, for the next person who touches this file: every previous
-  version of this file used Nodemailer over raw SMTP (ports 465/587)
-  to Gmail. That worked perfectly from a local machine but reliably
-  timed out (`ETIMEDOUT`, `command: 'CONN'`) when running on Render —
-  even after ruling out every configuration issue along the way (wrong
-  IP family, wrong Nodemailer version, wrong port). The conclusion,
-  confirmed by the local/Render split (identical code, identical
-  credentials, only the network differs): Render blocks outbound SMTP
-  ports from its containers. This is a known restriction on several
-  free-tier PaaS platforms, to stop their shared IP ranges from being
-  used to relay spam — no amount of client-side configuration can get
-  a raw SMTP connection through it.
-
-  The fix is to stop using SMTP entirely. Brevo's API sends email over
-  a normal HTTPS POST request (port 443) — indistinguishable from any
-  other outbound API call your app already makes, so it isn't affected
-  by SMTP-specific port blocking. Free tier: 300 emails/day, and unlike
-  Resend's default sender, Brevo's single-sender verification lets you
-  verify one email address you already own (e.g. your Gmail) by
-  clicking a confirmation link — no domain or DNS records required —
-  and then send to any recipient, not just yourself.
-
-  Setup (one-time, in the Brevo dashboard):
-    1. Sign up at brevo.com (free).
-    2. Settings → Senders, Domains & Dedicated IPs → add your email as
-       a sender → click the verification link Brevo emails you.
-    3. Settings → SMTP & API → API Keys → generate a new key.
-    4. Set on Render: BREVO_API_KEY=<that key>, and make sure
-       SMTP_FROM matches the exact address you verified as a sender.
-*/
-
 interface SendEmailOpts {
   to: string;
   subject: string;
   html: string;
   text: string;
 }
-
-/** Parses "Name <email@example.com>" or a bare "email@example.com" into
- *  Brevo's { name, email } sender shape. */
 function parseSender(from: string): { name?: string; email: string } {
   const match = from.match(/^(.*)<(.+)>$/);
   if (match) {
@@ -54,21 +16,8 @@ function parseSender(from: string): { name?: string; email: string } {
 export interface SendResult {
   ok: boolean;
   provider: EmailProvider;
-  /** Human-readable reason when ok is false (also logged). */
   error?: string;
 }
-
-/**
- * Send a transactional email through the configured provider (see env.email):
- *   - "brevo"   : Brevo's HTTP API — production, unchanged
- *   - "smtp"    : plain SMTP to Mailpit (localhost:1025) — local development
- *   - "both"    : Mailpit copy + real delivery through Brevo (local development
- *                 when you also want mail to reach real inboxes, e.g. Mailinator)
- *   - "console" : print the email to the server log
- * Never throws — a failed email should never break the request that triggered
- * it (signup, invite, password reset). The result says what happened, and
- * every failure is logged with the provider and a plain-language cause.
- */
 export async function sendEmail(opts: SendEmailOpts): Promise<SendResult> {
   const provider = env.email.provider;
   if (provider === "smtp") return sendViaSmtp(opts);
@@ -84,10 +33,6 @@ function fail(provider: EmailProvider, to: string, error: string): SendResult {
   console.error(`[email:${provider}] could not send to ${to}: ${error}`);
   return { ok: false, provider, error };
 }
-
-// ---- Local development: Mailpit (or any plain SMTP catcher) ----------------
-
-// nodemailer is loaded lazily so production (Brevo over HTTPS) never touches it.
 let smtpTransport: any;
 async function getSmtpTransport() {
   if (!smtpTransport) {
@@ -95,7 +40,7 @@ async function getSmtpTransport() {
     smtpTransport = nodemailer.createTransport({
       host: env.email.smtp.host,
       port: env.email.smtp.port,
-      secure: false, // Mailpit speaks plain SMTP; no auth, no TLS
+      secure: false, 
       ignoreTLS: true,
       connectionTimeout: 5_000,
       greetingTimeout: 5_000,
@@ -131,11 +76,6 @@ async function sendViaSmtp(opts: SendEmailOpts): Promise<SendResult> {
     return fail("smtp", opts.to, smtpErrorMessage(err));
   }
 }
-
-// ---- Both: Mailpit copy + real delivery ------------------------------------
-
-// Reserved/non-routable TLDs (RFC 2606/6761): a real mail provider can never
-// deliver to them, so don't spend Brevo quota or create bounces on them.
 const UNDELIVERABLE_TLDS = new Set(["test", "example", "invalid", "localhost", "local"]);
 const isUndeliverable = (addr: string) => UNDELIVERABLE_TLDS.has(addr.split("@").pop()!.split(".").pop()!.toLowerCase());
 
@@ -285,11 +225,6 @@ function otpBlock(code: string): string {
   </tr>
 </table>`;
 }
-
-/* ─────────────────────────────────────────────────────────
-   Email templates
-   ───────────────────────────────────────────────────────── */
-
 export function signupOtpEmail(name: string, code: string): SendEmailOpts {
   const text = `Hi ${name},\n\nYour Tickets verification code is:\n\n${code}\n\nEnter it to finish creating your organisation. The code expires in 15 minutes.\n\nIf you didn't request this, you can safely ignore this email.`;
 

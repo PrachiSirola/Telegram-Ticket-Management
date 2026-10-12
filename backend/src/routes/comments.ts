@@ -9,8 +9,6 @@ import { listNames, notify } from "../lib/notify.js";
 import { attachmentVisibleWhere } from "../lib/attachmentAccess.js";
 import { logActivity } from "../lib/activity.js";
 import { followerRecipients } from "../lib/followers.js";
-
-// mergeParams to receive :id (ticket id) from the parent mount.
 export const commentsRouter = Router({ mergeParams: true });
 
 const MAX_COMMENT_LENGTH = 10_000;
@@ -45,13 +43,11 @@ function serialize(
       ...a,
       previewable: PREVIEW_MIMES.has(a.mimeType),
     })),
-    // Only the author edits their words; author or an Admin can remove.
     canEdit: !archived && c.authorId === user.id,
     canDelete: !archived && (c.authorId === user.id || admin),
   };
 }
 
-// List comments on a ticket. Clients only see CLIENT_VISIBLE comments.
 commentsRouter.get("/", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
@@ -101,23 +97,18 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
   const orgId = ticket.project.orgId;
   const internal = isInternal(user, orgId);
 
-  // Clients can only post client-visible comments; internal team chooses.
   let visibility: "INTERNAL" | "CLIENT_VISIBLE" = internal
     ? parsed.data.visibility ?? "INTERNAL"
     : "CLIENT_VISIBLE";
-
-  // Replies are one level deep: replying to a reply attaches to the thread's root.
   let parentId: string | null = null;
   if (parsed.data.parentId) {
     const parent = await prisma.comment.findUnique({ where: { id: parsed.data.parentId } });
     if (!parent || parent.ticketId !== ticket.id) {
       return res.status(400).json({ error: "Invalid parentId" });
     }
-    // A customer can't reply into a thread they can't see.
     if (parent.visibility === "INTERNAL" && !internal) {
       return res.status(400).json({ error: "Invalid parentId" });
     }
-    // A reply to an internal thread can never be customer-visible (would leak the context).
     if (parent.visibility === "INTERNAL") visibility = "INTERNAL";
     parentId = parent.parentId ?? parent.id;
   }
@@ -137,11 +128,6 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
     });
     return created;
   });
-
-  // --- Notifications, respecting visibility ---
-  // Candidate recipients: reporter + assignee + mentioned users. Clients must
-  // NOT be notified about INTERNAL comments; notify() additionally drops
-  // non-members and clients not attached to the project.
   const followers = await followerRecipients(ticket.id, orgId, ticket.projectId, {
     customerVisible: visibility === "CLIENT_VISIBLE",
   });
@@ -191,8 +177,6 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
   res.status(201).json(serialize(comment, user, isAdminOrAbove(user, orgId), false));
 });
 
-// Edit a comment's text: the AUTHOR only (an Admin may remove a comment, but
-// never rewrite someone else's words). Visibility can't be changed afterwards.
 commentsRouter.patch("/:commentId", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
@@ -200,7 +184,6 @@ commentsRouter.patch("/:commentId", requireAuth, async (req, res) => {
   const user = req.user!;
   const orgId = ticket.project.orgId;
   const comment = await prisma.comment.findUnique({ where: { id: req.params.commentId } });
-  // Customers can't even tell internal comments exist.
   if (
     !comment ||
     comment.ticketId !== ticket.id ||
@@ -240,10 +223,6 @@ commentsRouter.patch("/:commentId", requireAuth, async (req, res) => {
   });
   res.json(serialize(updated, user, isAdminOrAbove(user, orgId), false));
 });
-
-// Delete a comment: author or SA/Admin of the org. Replies and attachment rows
-// cascade in the DB; attachment files (of the comment and its replies) are
-// removed from disk.
 commentsRouter.delete("/:commentId", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;

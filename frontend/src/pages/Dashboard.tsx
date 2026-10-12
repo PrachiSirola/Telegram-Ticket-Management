@@ -26,14 +26,12 @@ import {
   IconEdit,
   IconArchive,
 } from "../components/Icons";
-import type { Project, ProjectCounts, ProjectStatusFilter } from "../types";
+import type { Project, ProjectCounts, ProjectStatusFilter, TicketPriority, TicketStatus } from "../types";
 import { Dropdown } from "../components/Dropdown";
 
-
-/* ── Workspace illustration (warm outline art) ── */
 function HeroIllustration() {
-  const S = "#F2D9B8";          // warm light tan for strokes
-  const F = "#F2D9B8";          // fill accent
+  const S = "#F2D9B8";          
+  const F = "#F2D9B8";          
   return (
     <svg
       viewBox="0 0 520 220"
@@ -123,15 +121,27 @@ function HeroIllustration() {
 export default function Dashboard() {
   const { me } = useAuth();
   const { activeOrgId } = useOrg();
-  // "My Tickets" paging lives in the URL under its own keys (tpage / tsize /
-  // tview) so it can't collide with anything else on the Dashboard. Switching
-  // Assigned/Reported or the page size goes back to page 1.
-  const { filters, page, pageSize, setFilter: setListFilter, setPage, setPageSize } = useListParams({
+  const { filters, page, pageSize, setFilter: setListFilter, setFilters, setPage, setPageSize } = useListParams({
     pageKey: "tpage",
     sizeKey: "tsize",
-    filters: { tview: ["assigned", "reported"] },
+    filters: {
+      tview: ["assigned", "reported"],
+      tstatus: ["IN_PROGRESS", "DONE", "ALL"],
+      tpriority: ["LOW", "MEDIUM", "HIGH", "URGENT"],
+    },
+    dateKeys: ["tfrom", "tto"],
   });
   const filter = (filters.tview || "assigned") as "assigned" | "reported";
+  const statusSel = filters.tstatus || "OPEN"; // what the dropdown shows
+  const apiStatus = statusSel === "ALL" ? undefined : (statusSel as TicketStatus);
+  const prioritySel = (filters.tpriority || undefined) as TicketPriority | undefined;
+  const dueFrom = filters.tfrom || undefined;
+  const dueTo = filters.tto || undefined;
+  const atDefault = statusSel === "OPEN" && !prioritySel && !dueFrom && !dueTo;
+  const onlyDefaultStatus = statusSel === "OPEN" && !prioritySel && !dueFrom && !dueTo;
+  function resetTicketFilters() {
+    setFilters({ tstatus: "", tpriority: "", tfrom: "", tto: "" }); // keeps Assigned/Reported + page size
+  }
   const listTop = useRef<HTMLDivElement>(null);
   const {
     data: paged,
@@ -141,17 +151,14 @@ export default function Dashboard() {
     isError,
     refetch,
   } = useQuery({
-    queryKey: ["myTickets", activeOrgId, filter, page, pageSize],
-    queryFn: () => api.myTicketsPaged(activeOrgId, filter, { page, pageSize }),
+    queryKey: ["myTickets", activeOrgId, filter, page, pageSize, apiStatus ?? "ALL", prioritySel ?? "", dueFrom ?? "", dueTo ?? ""],
+    queryFn: () =>
+      api.myTicketsPaged(activeOrgId, filter, { page, pageSize, status: apiStatus, priority: prioritySel, dueFrom, dueTo }),
     enabled: !!activeOrgId,
     placeholderData: (prev, prevQuery) =>
       prevQuery?.queryKey[1] === activeOrgId && prevQuery?.queryKey[2] === filter ? prev : undefined,
   });
   const tickets = paged?.items;
-
-  // Server clamps an out-of-range page to the last page; mirror it into the URL.
-  // Skip while `paged` is only placeholder data from the previous page —
-  // that would look like a clamp and bounce the user straight back.
   useEffect(() => {
     if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
   }, [paged, isPlaceholderData, page, setPage]);
@@ -209,6 +216,69 @@ export default function Dashboard() {
             ))}
           </div>
         </div>
+
+        {/* Filters: Open by default; they combine, and apply to every ticket server-side. */}
+        <div className="mb-3 flex flex-wrap items-center gap-2" data-testid="ticket-filters">
+          <Dropdown
+            className="w-40"
+            size="sm"
+            placeholder="Open"
+            value={filters.tstatus ?? ""}
+            onChange={(v) => setListFilter("tstatus", v)}
+            options={[
+              { value: "", label: "Open" },
+              { value: "IN_PROGRESS", label: "In Progress" },
+              { value: "DONE", label: "Done" },
+              { value: "ALL", label: "All statuses" },
+            ]}
+          />
+          <Dropdown
+            className="w-40"
+            size="sm"
+            placeholder="All priorities"
+            value={filters.tpriority ?? ""}
+            onChange={(v) => setListFilter("tpriority", v)}
+            options={[
+              { value: "", label: "All priorities" },
+              ...["LOW", "MEDIUM", "HIGH", "URGENT"].map((p) => ({ value: p, label: p })),
+            ]}
+          />
+          <label className="flex items-center gap-1.5 text-xs font-medium text-muted">
+            Due from
+            <input
+              type="date"
+              className="input"
+              style={{ width: 146, minHeight: 36, padding: "0 10px", fontSize: 13 }}
+              aria-label="Due from"
+              value={filters.tfrom ?? ""}
+              max={filters.tto || undefined}
+              onChange={(e) => setFilters({ tfrom: e.target.value, ...(e.target.value && filters.tto && e.target.value > filters.tto ? { tto: e.target.value } : {}) })}
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs font-medium text-muted">
+            to
+            <input
+              type="date"
+              className="input"
+              style={{ width: 146, minHeight: 36, padding: "0 10px", fontSize: 13 }}
+              aria-label="Due to"
+              value={filters.tto ?? ""}
+              min={filters.tfrom || undefined}
+              onChange={(e) => setFilters({ tto: e.target.value, ...(e.target.value && filters.tfrom && e.target.value < filters.tfrom ? { tfrom: e.target.value } : {}) })}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm ml-auto"
+            data-testid="ticket-filters-reset"
+            disabled={atDefault}
+            title="Back to Open tickets, no other filters"
+            onClick={resetTicketFilters}
+          >
+            Reset
+          </button>
+        </div>
+
         <div ref={listTop} className="scroll-mt-4" />
         <div
           className={`card divide-line overflow-hidden transition-opacity ${
@@ -234,8 +304,23 @@ export default function Dashboard() {
               <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-accent text-primary">
                 <IconFolder size={20} />
               </div>
-              <p className="text-sm font-medium text-fg-soft">No tickets here yet.</p>
-              <p className="mt-1 text-xs text-muted">Tickets assigned or reported by you will show up here.</p>
+              {onlyDefaultStatus ? (
+                <>
+                  <p className="text-sm font-medium text-fg-soft">No open tickets {filter === "assigned" ? "assigned to you" : "reported by you"}.</p>
+                  <p className="mt-1 text-xs text-muted">Showing Open tickets by default.</p>
+                  <button className="btn btn-secondary btn-sm mt-3" onClick={() => setListFilter("tstatus", "ALL")}>
+                    Show all statuses
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-medium text-fg-soft">No tickets match these filters.</p>
+                  <p className="mt-1 text-xs text-muted">Try a different status, priority or date range.</p>
+                  <button className="btn btn-secondary btn-sm mt-3" onClick={resetTicketFilters}>
+                    Reset filters
+                  </button>
+                </>
+              )}
             </div>
           )}
           {tickets?.map((t) => <TicketRow key={t.id} ticket={t} showProject />)}
@@ -269,11 +354,9 @@ const PROJECT_COLORS = [
   { bg: "#f0ece8", icon: "#7a5030", border: "#d8cec2" },
 ];
 
-const PROJECTS_PAGE_SIZE_OPTIONS = [10, 25, 50, 100]; // same choices as the ticket lists
+const PROJECTS_PAGE_SIZE_OPTIONS = [10, 25, 50, 100]; 
 const DEFAULT_PROJECTS_PAGE_SIZE = 25;
 
-// "Current" (New + Active) is the default view; "All" is every non-archived
-// project. "Archived" is only offered to admins (the server enforces it too).
 const PROJECT_TABS: { key: ProjectStatusFilter; label: string; countKey: keyof ProjectCounts; adminOnly?: boolean }[] = [
   { key: "current", label: "Current", countKey: "current" },
   { key: undefined, label: "All", countKey: "all" },
@@ -298,19 +381,14 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
-  // Debounce the search box so we're not firing a request on every keystroke.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
     return () => clearTimeout(t);
   }, [search]);
 
-  // Any change to what's being filtered/searched/sized always lands back on page 1.
   useEffect(() => {
     setPage(1);
   }, [tab, pageSize, debouncedSearch]);
-
-  // Live tab counts (Active/Closed are computed server-side from ticket
-  // state, not stored — see backend/src/routes/projects.ts statusWhere()).
   const { data: counts } = useQuery({
     queryKey: ["projects", orgId, "counts"],
     queryFn: () => api.projectCounts(orgId),
@@ -336,23 +414,14 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
       setName("");
       setDescription("");
       setShowForm(false);
-      // A fresh project has zero tickets ("New"), which the default Current
-      // tab includes — jump back to it so the project doesn't look like it
-      // disappeared. Also clear any active search so it is guaranteed visible.
       setTab("current");
       setSearch("");
       qc.invalidateQueries({ queryKey: ["projects", orgId] });
     },
   });
-  // Edit / archive / restore / delete all just refresh every project query
-  // (lists, tab counts, the switcher) so the UI reflects the change at once.
-  // The success toast itself comes from the modal that did the work.
   function changed() {
     qc.invalidateQueries({ queryKey: ["projects", orgId] });
   }
-
-  // If deleting the last project on a page empties it (and it's not page 1),
-  // step back a page rather than showing a stranded empty page.
   useEffect(() => {
     if (paged && paged.items.length === 0 && page > 1) setPage(page - 1);
   }, [paged, page]);

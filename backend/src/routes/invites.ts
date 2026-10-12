@@ -10,7 +10,6 @@ import { isAllowedEmailDomain } from "../lib/password.js";
 import { inviteEmail, sendEmail, type SendResult } from "../lib/email.js";
 import type { Invite } from "@prisma/client";
 
-/** Email the invite link to the invitee. Never throws (sendEmail swallows). */
 async function sendInviteEmail(invite: Invite, inviterName: string): Promise<SendResult> {
   const [org, projects] = await Promise.all([
     prisma.organization.findUniqueOrThrow({
@@ -34,7 +33,6 @@ async function sendInviteEmail(invite: Invite, inviterName: string): Promise<Sen
   return sendEmail({ ...mail, to: invite.email });
 }
 
-// mergeParams so :orgId from the parent mount is available.
 export const invitesRouter = Router({ mergeParams: true });
 
 const inviteSchema = z.object({
@@ -43,8 +41,6 @@ const inviteSchema = z.object({
   projectIds: z.array(z.string()).optional(),
 });
 
-// Create an invite. SA may invite any role; Admins only Developers/Clients.
-// CLIENT invites must name at least one project (of this org) to attach.
 invitesRouter.post(
   "/",
   requireAuth,
@@ -65,7 +61,6 @@ invitesRouter.post(
       return res.status(403).json({ error: "Only the Super Admin can invite Admins" });
     }
 
-    // Already an active member of this org?
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       const member = await prisma.orgMembership.findUnique({
@@ -73,12 +68,6 @@ invitesRouter.post(
       });
       if (member) return res.status(409).json({ error: "This email is already a member" });
     }
-
-    // Clients must be attached to at least one project of THIS org.
-    // Developers may optionally be pre-attached to projects too (not
-    // required — a developer can also gain access later via ticket
-    // assignment, see lib/projectAccess.ts), but any ids they do provide
-    // still need to be validated the same way.
     let projectIds: string[] = [];
     if (role === "CLIENT") {
       projectIds = [...new Set(parsed.data.projectIds ?? [])];
@@ -117,8 +106,6 @@ invitesRouter.post(
       },
     });
 
-    // Email the link to the invitee, AND return it for manual sharing (belt
-    // and suspenders — email can be slow or land in spam).
     await sendInviteEmail(invite, req.user!.name);
 
     res.status(201).json({
@@ -130,14 +117,6 @@ invitesRouter.post(
     });
   },
 );
-
-// ---------------------------------------------------------------------------
-// Bulk invite. One role per batch; each recipient has their own project list
-// (the UI fills the same list for everyone in "same projects" mode). Every
-// recipient gets their own Invite row + unique token, so acceptance, expiry and
-// revoke work exactly like single invites. Per-recipient problems never abort
-// the batch — the response reports each address.
-// ---------------------------------------------------------------------------
 export const BULK_INVITE_MAX = 50;
 
 const bulkSchema = z.object({
@@ -152,9 +131,7 @@ type BulkStatus = "invited" | "skipped" | "invalid";
 interface BulkResult {
   email: string;
   status: BulkStatus;
-  /** Why it was skipped / rejected (or the email error when the mail didn't go out). */
   reason?: string;
-  /** invited only: did the email actually go out? The invite exists either way. */
   emailSent?: boolean;
   inviteUrl?: string;
 }
@@ -173,12 +150,10 @@ invitesRouter.post(
     const orgId = req.params.orgId;
     const { role, items } = parsed.data;
 
-    // Same rule as single invite: only the org's Super Admin may invite Admins.
     if (role === "ADMIN" && !isOrgSA(req.user!, orgId)) {
       return res.status(403).json({ error: "Only the Super Admin can invite Admins" });
     }
 
-    // Normalise, then split into rows we'll try vs. rows we can already reject.
     const results = new Map<number, BulkResult>();
     const seen = new Set<string>();
     const candidates: { idx: number; email: string; projectIds: string[] }[] = [];
@@ -208,7 +183,6 @@ invitesRouter.post(
     const memberEmails = new Set(users.filter((u) => u.memberships.length > 0).map((u) => u.email.toLowerCase()));
     const pendingEmails = new Set(pendingInvites.map((i) => i.email.toLowerCase()));
 
-    // Validate every referenced project belongs to THIS org in one query.
     const wantedProjects = [...new Set(candidates.flatMap((c) => (role === "ADMIN" ? [] : c.projectIds)))];
     const validProjects = new Set(
       wantedProjects.length
@@ -250,8 +224,6 @@ invitesRouter.post(
             expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days, same as single invite
           },
         });
-        // Sequential on purpose: gentle on the mail provider's rate limits, and a
-        // mail failure keeps the invite (link still shown) instead of losing it.
         const sent = await sendInviteEmail(invite, inviterName);
         results.set(c.idx, {
           email: c.email,
@@ -279,8 +251,6 @@ invitesRouter.post(
     });
   },
 );
-
-// List invites for the org. SA/Admin only.
 invitesRouter.get(
   "/",
   requireAuth,
@@ -304,8 +274,6 @@ invitesRouter.get(
     );
   },
 );
-
-// Re-send the invite email for a pending invite.
 invitesRouter.post(
   "/:inviteId/resend",
   requireAuth,

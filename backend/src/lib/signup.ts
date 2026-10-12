@@ -22,12 +22,6 @@ export class InvalidOtpError extends Error {
     super("Invalid or expired code. Please try again or request a new one.");
   }
 }
-
-/**
- * Start an organisation signup: stash the details in PendingSignup and return
- * the OTP for the caller to email. The User/Organization rows are only created
- * once the code is verified. Re-submitting regenerates the code.
- */
 export async function requestSignup(input: {
   orgName: string;
   name: string;
@@ -50,8 +44,6 @@ export async function requestSignup(input: {
   await prisma.pendingSignup.upsert({ where: { email }, update: data, create: { email, ...data } });
   return { code };
 }
-
-/** Regenerate the OTP for an in-progress signup. Null if none exists. */
 export async function resendSignupOtp(email: string): Promise<{ code: string } | null> {
   const pending = await prisma.pendingSignup.findUnique({
     where: { email: email.toLowerCase() },
@@ -64,11 +56,6 @@ export async function resendSignupOtp(email: string): Promise<{ code: string } |
   });
   return { code };
 }
-
-/**
- * Verify the OTP and materialise the signup: creates the User, the
- * Organization, and the creator's SUPER_ADMIN membership in one transaction.
- */
 export async function verifySignup(emailRaw: string, code: string): Promise<User> {
   const email = emailRaw.toLowerCase();
   const pending = await prisma.pendingSignup.findUnique({ where: { email } });
@@ -96,7 +83,6 @@ export async function verifySignup(emailRaw: string, code: string): Promise<User
       return user;
     });
   } catch (err: any) {
-    // Unique violation: the email got an account (e.g. via invite) mid-signup.
     if (err?.code === "P2002") throw new AccountExistsError();
     throw err;
   }

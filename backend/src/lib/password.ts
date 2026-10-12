@@ -1,14 +1,6 @@
 import bcrypt from "bcryptjs";
-
 const SALT_ROUNDS = 12;
-
-/** Minimum password policy shared by register / reset / change-password. */
 export const MIN_PASSWORD_LENGTH = 10;
-
-/** How many previous passwords (current + history) are checked for reuse. */
-export const PASSWORD_HISTORY_LIMIT = 5;
-
-/** Only accounts with an email at one of these domains may sign up. */
 export const ALLOWED_EMAIL_DOMAINS = [
   "gmail.com",
   "outlook.com",
@@ -23,12 +15,7 @@ export function isAllowedEmailDomain(email: string): boolean {
   const domain = email.split("@")[1]?.toLowerCase().trim();
   return !!domain && ALLOWED_EMAIL_DOMAINS.includes(domain);
 }
-
-// Upper + lower + digit + special char, no whitespace. Length checked separately
-// so we can give a specific "too short" message instead of a generic regex miss.
-const STRONG_PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9\s]).+$/;
-
-/** Returns a user-facing error message if the password is too weak, else null. */
+const STRONG_PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9\s]).+$/; 
 export function passwordStrengthError(password: string): string | null {
   if (password.length < MIN_PASSWORD_LENGTH) {
     return `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
@@ -41,14 +28,6 @@ export function passwordStrengthError(password: string): string | null {
   }
   return null;
 }
-
-/**
- * Rejects passwords built from the account's own email or name — e.g.
- * "Anju@123" for anju@gmail.com. Checks the email local-part (and its
- * `.`/`_`/`-`/digit-separated pieces) plus each word of the display name,
- * case-insensitive, fragments of length >= 3 only (avoids false positives
- * on short fragments like "an").
- */
 export function passwordContainsIdentityError(
   password: string,
   email: string,
@@ -76,8 +55,6 @@ export function passwordContainsIdentityError(
   }
   return null;
 }
-
-/** Thrown for password-policy violations detected server-side (identity match, reuse). */
 export class PasswordPolicyError extends Error {}
 
 export function hashPassword(plain: string): Promise<string> {
@@ -87,8 +64,6 @@ export function hashPassword(plain: string): Promise<string> {
 export function verifyPassword(plain: string, hash: string): Promise<boolean> {
   return bcrypt.compare(plain, hash);
 }
-
-/** True if `candidate` matches any of the given historical hashes. */
 export async function isPasswordRecentlyUsed(candidate: string, hashes: string[]): Promise<boolean> {
   for (const hash of hashes) {
     if (await bcrypt.compare(candidate, hash)) return true;

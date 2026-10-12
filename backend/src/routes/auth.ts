@@ -27,8 +27,6 @@ import { verifyPin, InvalidPinError, PinLockedError, createPinResetToken, resetP
 
 
 export const authRouter = Router();
-
-// Throttle credential-guessing / spam on the sensitive endpoints. Keyed by IP.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
@@ -41,12 +39,6 @@ const passwordField = z.string().superRefine((password, ctx) => {
   const err = passwordStrengthError(password);
   if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, message: err });
 });
-
-// ---------------------------------------------------------------------------
-// Two-factor pending cookie helpers (mirrors setSessionCookie/clearSessionCookie
-// in lib/login.ts, just shorter-lived and on a separate cookie name so a
-// half-completed login never doubles as a real session).
-// ---------------------------------------------------------------------------
 
 function setTwoFactorPendingCookie(res: Response, userId: string) {
   res.cookie(env.twoFactorCookieName, signTwoFactorChallenge(userId), {
@@ -65,10 +57,6 @@ function clearTwoFactorPendingCookie(res: Response) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Login / logout / session
-// ---------------------------------------------------------------------------
-
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
@@ -79,9 +67,6 @@ authRouter.post("/login", authLimiter, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: "Email and password are required." });
   try {
     const user = await loginWithPassword(parsed.data);
-
-    // Password checked out. If PIN-based 2FA is on, don't log them in yet —
-    // issue a short-lived pending cookie and make the frontend collect the PIN.
     if (user.twoFactorEnabled && user.twoFactorMethod === "PIN") {
       setTwoFactorPendingCookie(res, user.id);
       return res.json({ ok: true, requires2fa: true, method: "PIN" });
@@ -94,10 +79,6 @@ authRouter.post("/login", authLimiter, async (req, res) => {
     throw err;
   }
 });
-
-// Second step of PIN-based 2FA. Reads the pending cookie set by /login above,
-// verifies the PIN against that specific user, then (on success) upgrades to
-// a real session cookie exactly like a normal login would.
 const twoFactorVerifySchema = z.object({ pin: z.string().min(1) });
 
 authRouter.post("/2fa/verify", authLimiter, async (req, res) => {
@@ -121,11 +102,6 @@ authRouter.post("/2fa/verify", authLimiter, async (req, res) => {
     throw err;
   }
 });
-
-// Requires the pending-2FA cookie set by /login — i.e. only reachable mid-
-// login, right after the password check has already succeeded. This is what
-// stops a bare "reset my PIN" request from being usable by someone who
-// doesn't actually know the password.
 authRouter.post("/2fa/forgot-pin", authLimiter, async (req, res) => {
   const token = req.cookies?.[env.twoFactorCookieName];
   const payload = token ? verifyTwoFactorChallenge(token) : null;
@@ -156,8 +132,6 @@ authRouter.post("/2fa/reset-pin", authLimiter, async (req, res) => {
   }
   try {
     await resetPinWithToken(parsed.data.token, parsed.data.pin);
-    // Not logging them in here — same reasoning as password reset: show a
-    // success message, let them return to login and enter the new PIN.
     res.json({ ok: true });
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });
@@ -191,25 +165,15 @@ authRouter.get("/me", requireAuth, async (req, res) => {
     })),
   });
 });
-
-// Tells the frontend which optional auth features are available.
 authRouter.get("/config", (_req, res) => {
   res.json({ passwordReset: env.email.enabled });
 });
-
-// ---------------------------------------------------------------------------
-// Invites (member onboarding is invite-link-only)
-// ---------------------------------------------------------------------------
-
-// Validate a signup invite link. The account-creation form uses this to
-// pre-fill the (locked) email and pick the right flow for existing accounts.
 authRouter.get("/invite/:token", async (req, res) => {
   const invite = await getInviteByToken(req.params.token);
   if (!invite) return res.status(404).json({ error: "This invite link is invalid or has expired." });
   res.json(invite);
 });
 
-// New-account registration via invite link. The email comes from the token.
 const registerSchema = z.object({
   token: z.string().min(1),
   name: z.string().min(1).max(100),
@@ -233,7 +197,6 @@ authRouter.post("/register", authLimiter, async (req, res) => {
   }
 });
 
-// Existing account accepts an invite (must be signed in as the invited email).
 authRouter.post("/invite/:token/accept", requireAuth, async (req, res) => {
   try {
     await acceptInviteForUser(req.user!, req.params.token);
@@ -247,15 +210,10 @@ authRouter.post("/invite/:token/accept", requireAuth, async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Password reset
-// ---------------------------------------------------------------------------
-
 const forgotSchema = z.object({ email: z.string().email() });
 
 authRouter.post("/forgot-password", authLimiter, async (req, res) => {
   const parsed = forgotSchema.safeParse(req.body);
-  // Always respond the same way — never reveal whether the email is registered.
   const generic = { ok: true };
   if (!parsed.success) return res.json(generic);
 
@@ -280,9 +238,6 @@ authRouter.post("/reset-password", authLimiter, async (req, res) => {
   }
   try {
     await resetPasswordWithToken(parsed.data.token, parsed.data.password);
-    // Deliberately not calling setSessionCookie here — after a reset,
-    // the user should see a success message and sign in fresh, not be
-    // silently logged into a new session.
     res.json({ ok: true });
   } catch (err) {
     return res.status(400).json({ error: (err as Error).message });
