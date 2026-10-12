@@ -94,7 +94,12 @@ export default function Members() {
         <h1 className="text-2xl font-bold tracking-tight text-fg">Members</h1>
       </div>
 
-      <InviteForm orgId={activeOrgId} canInviteAdmin={sa} />
+      <InviteForm
+        key={activeOrgId /* reset typed email/projects when the workspace changes */}
+        orgId={activeOrgId}
+        orgName={activeOrg?.name ?? ""}
+        canInviteAdmin={sa}
+      />
 
       {pending.length > 0 && (
         <section>
@@ -232,7 +237,15 @@ export default function Members() {
   );
 }
 
-function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: boolean }) {
+function InviteForm({
+  orgId,
+  orgName,
+  canInviteAdmin,
+}: {
+  orgId: string;
+  orgName: string;
+  canInviteAdmin: boolean;
+}) {
   const qc = useQueryClient();
   const [email, setEmail] = useState("");
   const [emailTouched, setEmailTouched] = useState(false);
@@ -334,7 +347,7 @@ function InviteForm({ orgId, canInviteAdmin }: { orgId: string; canInviteAdmin: 
       {mut.data && (
         <div className="card-subtle mt-4 p-4">
           <p className="mb-2 text-xs text-fg-soft">
-            Invite emailed. You can also share the link directly — the invitee uses it to set up
+            Invite to <strong>{orgName}</strong> emailed to <strong>{mut.data.email}</strong>. You can also share the link directly — the invitee uses it to set up
             their account (or accept with an existing one):
           </p>
           <CopyLink url={mut.data.inviteUrl} />

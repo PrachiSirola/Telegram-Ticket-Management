@@ -4,6 +4,8 @@ export type TicketStatus = "OPEN" | "IN_PROGRESS" | "DONE";
 export type TicketPriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
 export type TicketType = "BUG" | "FEATURE" | "TASK";
 export type CommentVisibility = "INTERNAL" | "CLIENT_VISIBLE";
+/** Attachments add "Selected Members" on top of the comment visibilities. */
+export type AttachmentVisibility = "INTERNAL" | "CLIENT_VISIBLE" | "SELECTED";
 
 export type WorkRange = "current" | "today" | "week" | "prev_week" | "month" | "prev_month" | "custom";
 export type WorkStatusFilter = "all" | "pending" | "in_progress" | "completed" | "overdue";
@@ -15,6 +17,13 @@ export interface Paged<T> {
   total: number;
   page: number;
   pageSize: number;
+}
+
+/** Ticket lists: the generic envelope plus the extra metadata the ticket endpoints send. */
+export interface TicketPage<T> extends Paged<T> {
+  totalPages: number;
+  hasNext: boolean;
+  hasPrev: boolean;
 }
 
 export interface ProjectCounts {
@@ -82,6 +91,7 @@ export interface OrgInvite {
 export interface InviteInfo {
   email: string;
   role: InviteRole;
+  orgId: string;
   orgName: string;
   projectNames: string[];
   accountExists: boolean;
@@ -114,8 +124,28 @@ export interface Ticket {
   estimate: number | null;
   assignee: UserLite | null;
   reporter: UserLite | null;
+  /** Set when the ticket is archived (hidden from lists + customers, restorable). */
+  archivedAt?: string | null;
+  /** Only on GET /tickets/:id — what the signed-in user may do (enforced again by the API). */
+  can?: TicketPermissions;
+  following?: boolean;
+  followerCount?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TicketPermissions {
+  edit: boolean;
+  changeStatus: boolean;
+  changePriority: boolean;
+  assign: boolean;
+  selfAssign: boolean;
+  duplicate: boolean;
+  addFollower: boolean;
+  move: boolean;
+  archive: boolean;
+  restore: boolean;
+  delete: boolean;
 }
 
 export interface CommentAttachment {
@@ -123,6 +153,8 @@ export interface CommentAttachment {
   filename: string;
   mimeType: string;
   size: number;
+  createdAt?: string;
+  previewable?: boolean;
 }
 
 export interface Comment {
@@ -132,18 +164,71 @@ export interface Comment {
   visibility: CommentVisibility;
   parentId: string | null;
   createdAt: string;
+  editedAt?: string | null;
+  canEdit?: boolean;
+  canDelete?: boolean;
   author: { id: string; name: string; avatarUrl: string | null };
   attachments?: CommentAttachment[];
 }
 
 export interface Attachment {
   id: string;
+  ticketId?: string;
+  commentId?: string | null;
   filename: string;
   mimeType: string;
   size: number;
-  visibility: CommentVisibility;
+  visibility: AttachmentVisibility;
   createdAt: string;
   uploader: { id: string; name: string };
+  previewable?: boolean;
+  canDelete?: boolean;
+  canChangeVisibility?: boolean;
+  /** Who a "Selected Members" file is shared with (team only). */
+  selectedUsers?: { id: string; name: string }[];
+}
+
+/** A person who can be picked as a follower / file recipient (the project's team). */
+export interface TeamMember {
+  userId: string;
+  name: string;
+  email: string;
+  avatarUrl: string | null;
+  role: OrgRole;
+}
+
+export type ActivityType =
+  | "TICKET_CREATED"
+  | "STATUS_CHANGED"
+  | "PRIORITY_CHANGED"
+  | "TYPE_CHANGED"
+  | "TITLE_CHANGED"
+  | "DESCRIPTION_CHANGED"
+  | "DUE_DATE_CHANGED"
+  | "ASSIGNED"
+  | "ATTACHMENT_ADDED"
+  | "ATTACHMENT_DELETED"
+  | "ATTACHMENT_VISIBILITY_CHANGED"
+  | "COMMENT_ADDED"
+  | "COMMENT_EDITED"
+  | "COMMENT_DELETED"
+  | "FOLLOWER_ADDED"
+  | "FOLLOWER_REMOVED"
+  | "MOVED"
+  | "ARCHIVED"
+  | "RESTORED"
+  | "DUPLICATED";
+
+export interface ActivityItem {
+  id: string;
+  type: ActivityType;
+  field: string | null;
+  from: string | null;
+  to: string | null;
+  meta?: Record<string, unknown> | null;
+  internalOnly: boolean;
+  createdAt: string;
+  actor: { id: string; name: string; avatarUrl: string | null };
 }
 
 export interface Notification {

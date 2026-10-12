@@ -5,16 +5,9 @@ export interface MentionMember {
   id: string;
   name: string;
 }
-
-/**
- * IDs of `picked` members whose "@Name" still appears in the body — a picked
- * mention the user later deleted from the text is dropped.
- */
 export function extractMentionIds(body: string, picked: MentionMember[]): string[] {
   return [...new Set(picked.filter((m) => body.includes(`@${m.name}`)).map((m) => m.id))];
 }
-
-/** Textarea with an @-mention popup fed by the project member list. */
 export function MentionTextarea({
   value,
   onChange,
@@ -23,6 +16,10 @@ export function MentionTextarea({
   rows = 3,
   placeholder,
   className = "input",
+  textareaRef,
+  disabled,
+  maxLength,
+  autoFocus,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -31,9 +28,14 @@ export function MentionTextarea({
   rows?: number;
   placeholder?: string;
   className?: string;
+  textareaRef?: React.RefObject<HTMLTextAreaElement>;
+  disabled?: boolean;
+  maxLength?: number;
+  autoFocus?: boolean;
 }) {
-  const ref = useRef<HTMLTextAreaElement>(null);
-  const [query, setQuery] = useState<string | null>(null); // text after "@", null = menu closed
+  const innerRef = useRef<HTMLTextAreaElement>(null);
+  const ref = textareaRef ?? innerRef;
+  const [query, setQuery] = useState<string | null>(null); 
   const [active, setActive] = useState(0);
 
   const matches =
@@ -93,6 +95,9 @@ export function MentionTextarea({
         className={className}
         rows={rows}
         placeholder={placeholder}
+        disabled={disabled}
+        maxLength={maxLength}
+        autoFocus={autoFocus}
         value={value}
         onChange={handleChange}
         onKeyDown={handleKeyDown}

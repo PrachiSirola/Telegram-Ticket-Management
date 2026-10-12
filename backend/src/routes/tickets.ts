@@ -4,9 +4,49 @@ import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireProjectAccess } from "../middleware/org.js";
 import { isAdminOrAbove, isInternal, orgRole } from "../lib/access.js";
-import { loadTicketForUser } from "../lib/ticketAccess.js";
+import { loadTicketForUser, rejectIfArchived } from "../lib/ticketAccess.js";
 import { deleteTicketFiles } from "../lib/storage.js";
 import { listNames, notify } from "../lib/notify.js";
+import { logActivity } from "../lib/activity.js";
+import { followerRecipients } from "../lib/followers.js";
+import {
+  paginate,
+  parsePageParams,
+  TICKET_TIEBREAK,
+  wantsPagination,
+} from "../lib/pagination.js";
+const emptyToUndef = (v: unknown) => (v === "" ? undefined : v);
+const listFilterSchema = z.object({
+  status: z.preprocess(emptyToUndef, z.enum(["OPEN", "IN_PROGRESS", "DONE"]).optional()),
+  priority: z.preprocess(emptyToUndef, z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional()),
+  type: z.preprocess(emptyToUndef, z.enum(["BUG", "FEATURE", "TASK"]).optional()),
+  assigneeId: z.preprocess(emptyToUndef, z.string().optional()),
+  q: z.preprocess(emptyToUndef, z.string().optional()),
+  archived: z.preprocess(emptyToUndef, z.enum(["active", "archived", "all"]).optional()),
+});
+export function ticketPermissions(
+  user: Parameters<typeof isInternal>[0],
+  orgId: string,
+  ticket: { reporterId: string; archivedAt: Date | null },
+) {
+  const internal = isInternal(user, orgId);
+  const admin = isAdminOrAbove(user, orgId);
+  const reporter = ticket.reporterId === user.id;
+  const live = !ticket.archivedAt;
+  return {
+    edit: live && (admin || (reporter && !internal)),
+    changeStatus: live && internal,
+    changePriority: live && internal,
+    assign: live && admin,
+    selfAssign: live && internal,
+    duplicate: admin,
+    addFollower: admin,
+    move: live && admin,
+    archive: live && admin,
+    restore: !live && admin,
+    delete: admin || (orgRole(user, orgId) !== "DEVELOPER" && reporter),
+  };
+}
 
 const userSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
 
@@ -25,6 +65,7 @@ function serialize(t: any) {
     estimate: t.estimate,
     assignee: t.assignee ?? null,
     reporter: t.reporter ?? null,
+    archivedAt: t.archivedAt ?? null,
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
   };
@@ -35,18 +76,12 @@ const ticketInclude = {
   reporter: userSelect,
   project: { select: { id: true, name: true, orgId: true } },
 };
-
-/** Is userId an active internal (non-client) member of the org? */
 async function isAssignableMember(userId: string, orgId: string) {
   const m = await prisma.orgMembership.findUnique({
     where: { userId_orgId: { userId, orgId } },
   });
   return Boolean(m && !m.disabled && m.role !== "CLIENT");
 }
-
-// ---------------------------------------------------------------------------
-// Project-scoped: /orgs/:orgId/projects/:projectId/tickets
-// ---------------------------------------------------------------------------
 export const projectTicketsRouter = Router({ mergeParams: true });
 
 projectTicketsRouter.get(
@@ -55,20 +90,32 @@ projectTicketsRouter.get(
   requireOrgAccess,
   requireProjectAccess,
   async (req, res) => {
-    const { status, priority, type, assigneeId, q } = req.query as Record<string, string>;
-    const tickets = await prisma.ticket.findMany({
-      where: {
-        projectId: req.project!.id,
-        ...(status ? { status: status as any } : {}),
-        ...(priority ? { priority: priority as any } : {}),
-        ...(type ? { type: type as any } : {}),
-        ...(assigneeId ? { assigneeId } : {}),
-        ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
-      },
-      include: ticketInclude,
-      orderBy: [{ updatedAt: "desc" }],
-    });
-    res.json(tickets.map(serialize));
+    const filters = listFilterSchema.safeParse(req.query);
+    if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
+    const { status, priority, type, assigneeId, q, archived } = filters.data;
+    const archivedMode = isInternal(req.user!, req.params.orgId) ? archived ?? "active" : "active";
+    const where = {
+      projectId: req.project!.id,
+      ...(archivedMode === "active" ? { archivedAt: null } : {}),
+      ...(archivedMode === "archived" ? { archivedAt: { not: null } } : {}),
+      ...(status ? { status } : {}),
+      ...(priority ? { priority } : {}),
+      ...(type ? { type } : {}),
+      ...(assigneeId ? { assigneeId } : {}),
+      ...(q ? { title: { contains: q, mode: "insensitive" as const } } : {}),
+    };
+    const orderBy = [{ updatedAt: "desc" as const }, TICKET_TIEBREAK];
+    if (!wantsPagination(req.query)) {
+      const tickets = await prisma.ticket.findMany({ where, include: ticketInclude, orderBy });
+      return res.json(tickets.map(serialize));
+    }
+    const paged = await paginate(
+      parsePageParams(req.query),
+      () => prisma.ticket.count({ where }),
+      (skip, take) =>
+        prisma.ticket.findMany({ where, include: ticketInclude, orderBy, skip, take }),
+    );
+    res.json({ ...paged, items: paged.items.map(serialize) });
   },
 );
 
@@ -95,8 +142,6 @@ projectTicketsRouter.post(
     const user = req.user!;
     const orgId = req.params.orgId;
     const projectId = req.project!.id;
-
-    // Only SA/Admin may assign on creation; assignees are internal members.
     let assigneeId: string | null = null;
     if (data.assigneeId) {
       if (!isAdminOrAbove(user, orgId)) {
@@ -108,22 +153,40 @@ projectTicketsRouter.post(
       assigneeId = data.assigneeId;
     }
 
-    const ticket = await prisma.ticket.create({
-      data: {
-        projectId,
-        title: data.title,
-        description: data.description ?? "",
-        priority: data.priority ?? "MEDIUM",
-        type: data.type ?? "TASK",
-        dueDate: data.dueDate ? new Date(data.dueDate) : null,
-        estimate: data.estimate ?? null,
-        reporterId: user.id,
-        assigneeId,
-      },
-      include: ticketInclude,
+    const ticket = await prisma.$transaction(async (tx) => {
+      const created = await tx.ticket.create({
+        data: {
+          projectId,
+          title: data.title,
+          description: data.description ?? "",
+          priority: data.priority ?? "MEDIUM",
+          type: data.type ?? "TASK",
+          dueDate: data.dueDate ? new Date(data.dueDate) : null,
+          estimate: data.estimate ?? null,
+          reporterId: user.id,
+          assigneeId,
+        },
+        include: ticketInclude,
+      });
+      await logActivity(tx, {
+        ticketId: created.id,
+        actorId: user.id,
+        type: "TICKET_CREATED",
+        to: created.title,
+      });
+      if (assigneeId) {
+        await logActivity(tx, {
+          ticketId: created.id,
+          actorId: user.id,
+          type: "ASSIGNED",
+          field: "assignee",
+          from: null,
+          to: created.assignee?.name ?? null,
+          meta: { toId: assigneeId },
+        });
+      }
+      return created;
     });
-
-    // Announce to the org's Telegram chat (no in-app recipients here).
     await notify({
       recipientIds: [],
       type: "ASSIGNED",
@@ -149,9 +212,6 @@ projectTicketsRouter.post(
         message: `${user.name} assigned you the ticket "${ticket.title}".`,
       });
     }
-
-    // Mentions in the description — notify() filters to actual org members
-    // (and, for clients, project attachment).
     if (data.mentions?.length) {
       const mentioned = await prisma.user.findMany({
         where: { id: { in: data.mentions } },
@@ -174,10 +234,6 @@ projectTicketsRouter.post(
     res.status(201).json(serialize(ticket));
   },
 );
-
-// ---------------------------------------------------------------------------
-// By id: /tickets/:id
-// ---------------------------------------------------------------------------
 export const ticketsRouter = Router();
 
 ticketsRouter.get("/:id", requireAuth, async (req, res) => {
@@ -187,7 +243,22 @@ ticketsRouter.get("/:id", requireAuth, async (req, res) => {
     where: { id: ticket.id },
     include: ticketInclude,
   });
-  res.json(serialize(full));
+  const user = req.user!;
+  const orgId = ticket.project.orgId;
+  const internal = isInternal(user, orgId);
+  const following = internal
+    ? Boolean(
+        await prisma.ticketFollower.findUnique({
+          where: { ticketId_userId: { ticketId: ticket.id, userId: user.id } },
+        }),
+      )
+    : false;
+  res.json({
+    ...serialize(full),
+    followerCount: internal ? await prisma.ticketFollower.count({ where: { ticketId: ticket.id } }) : undefined,
+    following,
+    can: ticketPermissions(user, orgId, ticket),
+  });
 });
 
 const updateSchema = z.object({
@@ -204,6 +275,7 @@ const updateSchema = z.object({
 ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
+  if (rejectIfArchived(ticket, res)) return;
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const body = parsed.data;
@@ -215,33 +287,29 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
   const isReporter = ticket.reporterId === user.id;
 
   const data: Record<string, unknown> = {};
-
-  // Content fields: internal team always; the reporting client may edit
-  // title/description of their own ticket.
   if (body.title !== undefined) {
-    if (!internal && !isReporter) return res.status(403).json({ error: "Cannot edit title" });
+    if (!admin && !(isReporter && !internal)) return res.status(403).json({ error: "Only admins can edit ticket details" });
     data.title = body.title;
   }
   if (body.description !== undefined) {
-    if (!internal && !isReporter) return res.status(403).json({ error: "Cannot edit description" });
+    if (!admin && !(isReporter && !internal)) return res.status(403).json({ error: "Only admins can edit ticket details" });
     data.description = body.description;
   }
   for (const field of ["priority", "type", "dueDate", "estimate"] as const) {
     if (body[field] !== undefined) {
-      if (!internal) return res.status(403).json({ error: `Cannot edit ${field}` });
+      // Priority is a working field for the internal team; the rest are ticket details (admins only).
+      if (field === "priority" ? !internal : !admin) {
+        return res.status(403).json({ error: field === "priority" ? "Cannot edit priority" : "Only admins can edit ticket details" });
+      }
       data[field] = field === "dueDate" && body.dueDate ? new Date(body.dueDate) : body[field];
     }
   }
-
-  // Status: internal team only.
   let statusChanged = false;
   if (body.status !== undefined) {
     if (!internal) return res.status(403).json({ error: "Cannot change status" });
     statusChanged = body.status !== ticket.status;
     data.status = body.status;
   }
-
-  // Assignee (arbitrary): SA/Admin only; assignees are internal members.
   let newAssignee: string | null | undefined;
   if (body.assigneeId !== undefined) {
     if (!admin) return res.status(403).json({ error: "Only admins can reassign" });
@@ -252,25 +320,66 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
     data.assigneeId = newAssignee;
   }
 
-  const updated = await prisma.ticket.update({
-    where: { id: ticket.id },
-    data,
-    include: ticketInclude,
+  const oldAssignee =
+    newAssignee !== undefined && ticket.assigneeId
+      ? await prisma.user.findUnique({ where: { id: ticket.assigneeId }, select: { name: true } })
+      : null;
+  const dayOf = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.ticket.update({
+      where: { id: ticket.id },
+      data,
+      include: ticketInclude,
+    });
+    const log = (a: Omit<Parameters<typeof logActivity>[1], "ticketId" | "actorId">) =>
+      logActivity(tx, { ticketId: ticket.id, actorId: user.id, ...a });
+
+    if (statusChanged) {
+      await tx.ticketStatusHistory.create({
+        data: {
+          ticketId: ticket.id,
+          fromStatus: ticket.status,
+          toStatus: row.status,
+          changedById: user.id,
+        },
+      });
+      await log({ type: "STATUS_CHANGED", field: "status", from: ticket.status, to: row.status });
+    }
+    if (row.priority !== ticket.priority) {
+      await log({ type: "PRIORITY_CHANGED", field: "priority", from: ticket.priority, to: row.priority });
+    }
+    if (row.type !== ticket.type) {
+      await log({ type: "TYPE_CHANGED", field: "type", from: ticket.type, to: row.type });
+    }
+    if (row.title !== ticket.title) {
+      await log({ type: "TITLE_CHANGED", field: "title", from: ticket.title.slice(0, 200), to: row.title.slice(0, 200) });
+    }
+    if (row.description !== ticket.description) {
+      await log({ type: "DESCRIPTION_CHANGED", field: "description" });
+    }
+    if (dayOf(row.dueDate) !== dayOf(ticket.dueDate)) {
+      await log({ type: "DUE_DATE_CHANGED", field: "dueDate", from: dayOf(ticket.dueDate), to: dayOf(row.dueDate) });
+    }
+    if (newAssignee !== undefined && newAssignee !== ticket.assigneeId) {
+      await log({
+        type: "ASSIGNED",
+        field: "assignee",
+        from: oldAssignee?.name ?? null,
+        to: row.assignee?.name ?? null,
+        meta: { fromId: ticket.assigneeId, toId: newAssignee },
+      });
+    }
+    return row;
+  });
+
+  const followers = await followerRecipients(ticket.id, orgId, ticket.projectId, {
+    customerVisible: true,
   });
 
   if (statusChanged) {
-    // Source of truth for "when was this completed" — see the model's doc
-    // comment in schema.prisma for why this exists separately from updatedAt.
-    await prisma.ticketStatusHistory.create({
-      data: {
-        ticketId: ticket.id,
-        fromStatus: ticket.status,
-        toStatus: updated.status,
-        changedById: user.id,
-      },
-    });
     await notify({
-      recipientIds: [ticket.reporterId, ticket.assigneeId ?? ""].filter(Boolean),
+      recipientIds: [ticket.reporterId, ticket.assigneeId ?? "", ...followers].filter(Boolean),
       type: "STATUS_CHANGED",
       ticket: updated,
       orgId,
@@ -323,10 +432,30 @@ ticketsRouter.post("/:id/self-assign", requireAuth, async (req, res) => {
   if (!isInternal(user, ticket.project.orgId)) {
     return res.status(403).json({ error: "Only internal team members can self-assign" });
   }
-  const updated = await prisma.ticket.update({
-    where: { id: ticket.id },
-    data: { assigneeId: user.id },
-    include: ticketInclude,
+  if (rejectIfArchived(ticket, res)) return;
+  if (ticket.assigneeId === user.id) {
+    const same = await prisma.ticket.findUnique({ where: { id: ticket.id }, include: ticketInclude });
+    return res.json(serialize(same));
+  }
+  const previous = ticket.assigneeId
+    ? await prisma.user.findUnique({ where: { id: ticket.assigneeId }, select: { name: true } })
+    : null;
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.ticket.update({
+      where: { id: ticket.id },
+      data: { assigneeId: user.id },
+      include: ticketInclude,
+    });
+    await logActivity(tx, {
+      ticketId: ticket.id,
+      actorId: user.id,
+      type: "ASSIGNED",
+      field: "assignee",
+      from: previous?.name ?? null,
+      to: user.name,
+      meta: { fromId: ticket.assigneeId, toId: user.id, self: true },
+    });
+    return row;
   });
   res.json(serialize(updated));
 });

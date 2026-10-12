@@ -88,9 +88,8 @@ export default function CreateOrg() {
                 You're not in any organisation
               </h1>
               <p className="mb-0 mt-2 text-sm leading-relaxed text-fg-soft">
-                Only the platform Super Admin can create a new organisation. Ask them to create
-                one and invite you, or ask your administrator for an invite link to join an
-                existing one.
+                Only a Super Admin can create a new organisation. Ask one to create it and invite
+                you, or ask your administrator for an invite link to join an existing one.
               </p>
             </>
           ) : sent ? (

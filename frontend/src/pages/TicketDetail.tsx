@@ -1,38 +1,31 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { isAdminOrAboveIn, isDeveloperIn, isInternalIn, useAuth } from "../auth";
+import { isInternalIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { Avatar, PriorityBadge, StatusBadge, TypeBadge } from "../components/ui";
+import { ActivityTimeline } from "../components/ActivityTimeline";
 import { Attachments } from "../components/Attachments";
+import { Comments } from "../components/Comments";
 import { ConfirmModal } from "../components/ConfirmModal";
-import { Dropdown } from "../components/Dropdown";
-import {
-  MentionTextarea,
-  extractMentionIds,
-  type MentionMember,
-} from "../components/MentionTextarea";
-import { IconUpload, IconTrash, IconCheckCircle } from "../components/Icons";
-import type { Comment, CommentAttachment, CommentVisibility } from "../types";
-import { todayStr } from "../lib/dateUtils";
+import { TicketActions } from "../components/TicketActions";
+import { IconArchive, IconCheckCircle } from "../components/Icons";
 
 export default function TicketDetail() {
   const { id = "" } = useParams();
   const { me } = useAuth();
   const { activeOrgId, setActiveOrg } = useOrg();
   const qc = useQueryClient();
-  const navigate = useNavigate();
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [confirmingClose, setConfirmingClose] = useState(false);
+  const [tab, setTab] = useState<"comments" | "activity">("comments");
+  useEffect(() => setTab("comments"), [id]);
 
-  const { data: ticket, isLoading } = useQuery({
+  const { data: ticket, isLoading, isError, error } = useQuery({
     queryKey: ["ticket", id],
     queryFn: () => api.ticket(id),
+    retry: (n, e: any) => e?.response?.status !== 404 && n < 2,
   });
-
-  // Cross-org notification clicks land here with a different active org —
-  // sync the switcher to the ticket's org.
   const ticketOrgId = ticket?.orgId ?? "";
   useEffect(() => {
     if (ticketOrgId && ticketOrgId !== activeOrgId) setActiveOrg(ticketOrgId);
@@ -46,42 +39,47 @@ export default function TicketDetail() {
   const { data: comments } = useQuery({
     queryKey: ["comments", id],
     queryFn: () => api.comments(id),
+    enabled: !!ticket,
   });
 
   const update = useMutation({
     mutationFn: (data: Parameters<typeof api.updateTicket>[1]) => api.updateTicket(id, data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["ticket", id] }),
-  });
-  const selfAssign = useMutation({
-    mutationFn: () => api.selfAssign(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["ticket", id] }),
-  });
-  const deleteTicket = useMutation({
-    mutationFn: () => api.deleteTicket(id),
     onSuccess: () => {
-      const projectId = ticket!.projectId;
+      qc.invalidateQueries({ queryKey: ["ticket", id] });
+      qc.invalidateQueries({ queryKey: ["activity", id] });
       qc.invalidateQueries({ queryKey: ["tickets"] });
-      navigate(`/projects/${projectId}`);
     },
   });
 
-  if (isLoading || !ticket) return <div className="text-sm text-muted">Loading…</div>;
+  if (isLoading) return <div className="text-sm text-muted">Loading…</div>;
+  if (isError || !ticket) {
+    const notFound = (error as any)?.response?.status === 404;
+    return (
+      <div className="card p-8 text-center text-sm">
+        <p className="font-medium text-fg">{notFound ? "Ticket not found" : "Couldn't load this ticket"}</p>
+        <p className="mt-1 text-muted">
+          {notFound
+            ? "It may have been deleted, archived, or you may not have access."
+            : "Check your connection and try again."}
+        </p>
+        <Link to="/" className="btn btn-secondary btn-sm mt-4">
+          Back to dashboard
+        </Link>
+      </div>
+    );
+  }
 
   const orgId = ticket.orgId ?? "";
   const internal = isInternalIn(me, orgId);
-  const admin = isAdminOrAboveIn(me, orgId);
-  // Developers never get delete access, even for tickets they reported —
-  // only SA/Admin, or a reporting CLIENT deleting their own ticket.
-  const canDeleteTicket = admin || (!isDeveloperIn(me, orgId) && ticket.reporter?.id === me?.id);
-  const assignable = (members ?? []).filter((m) => m.role !== "CLIENT");
-  const mentionables: MentionMember[] = (members ?? []).map((m) => ({
-    id: m.userId,
-    name: m.name,
-  }));
+  const archived = !!ticket.archivedAt;
+  const projectMembers = members ?? [];
+  const assignable = projectMembers.filter((m) => m.role !== "CLIENT");
+  const memberNames = projectMembers.map((m) => m.name);
+  const can = ticket.can;
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_280px]">
-      <div>
+      <div className="min-w-0">
         {/* Breadcrumb */}
         {ticket.project && (
           <div className="mb-3 text-sm text-muted">
@@ -93,41 +91,74 @@ export default function TicketDetail() {
           </div>
         )}
 
-        <h1 className="text-2xl font-bold tracking-tight text-fg">{ticket.title}</h1>
+        {archived && (
+          <div className="alert mb-4 flex items-start gap-2 text-sm" role="status" data-testid="archived-banner">
+            <IconArchive size={16} className="mt-0.5 shrink-0" />
+            <div>
+              <span className="font-semibold text-fg">This ticket is archived.</span>{" "}
+              <span className="text-fg-soft">
+                It's hidden from ticket lists and from customers, and is read-only
+                {can?.restore ? " until an admin restores it." : "."}
+              </span>
+            </div>
+          </div>
+        )}
+
+        <h1 className="break-words text-2xl font-bold tracking-tight text-fg">{ticket.title}</h1>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <StatusBadge status={ticket.status} />
           <PriorityBadge priority={ticket.priority} />
           <TypeBadge type={ticket.type} />
+          {archived && <span className="badge b-outline-muted">Archived</span>}
         </div>
 
-        <p className="mt-5 whitespace-pre-wrap text-fg-soft">
+        <TicketActions
+          ticket={ticket}
+          me={me ? { id: me.id, name: me.name } : null}
+          assignable={assignable}
+        />
+
+        <p className="mt-5 whitespace-pre-wrap break-words text-fg-soft">
           {ticket.description ? (
-            renderWithMentions(ticket.description, mentionables.map((m) => m.name))
+            renderWithMentions(ticket.description, memberNames)
           ) : (
             <span className="text-muted">No description.</span>
           )}
         </p>
 
-        <Attachments ticketId={id} canPostInternal={internal} />
+        <Attachments ticketId={id} canPostInternal={internal} archived={archived} />
 
-        <div className="eyebrow mb-2 mt-8">Comments</div>
-        <CommentThread
-          comments={comments ?? []}
-          ticketId={id}
-          canDelete={(c) => admin || c.author.id === me?.id}
-          memberNames={mentionables.map((m) => m.name)}
-          onDeleted={() => qc.invalidateQueries({ queryKey: ["comments", id] })}
-        />
-        <CommentForm
-          ticketId={id}
-          canPostInternal={internal}
-          members={mentionables}
-          onPosted={() => qc.invalidateQueries({ queryKey: ["comments", id] })}
-        />
+        {/* Comments / Activity */}
+        <div className="mb-3 mt-8 flex gap-1 border-b border-card-border" role="tablist" aria-label="Discussion">
+          {(
+            [
+              ["comments", `Comments${comments ? ` (${comments.length})` : ""}`],
+              ["activity", "Activity"],
+            ] as const
+          ).map(([key, text]) => (
+            <button
+              key={key}
+              role="tab"
+              aria-selected={tab === key}
+              data-testid={`tab-${key}`}
+              onClick={() => setTab(key)}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm font-semibold transition-colors ${
+                tab === key ? "border-primary text-primary" : "border-transparent text-muted hover:text-fg"
+              }`}
+            >
+              {text}
+            </button>
+          ))}
+        </div>
+        {tab === "comments" ? (
+          <Comments key={id} ticketId={id} internal={internal} archived={archived} members={projectMembers} />
+        ) : (
+          <ActivityTimeline ticketId={id} internal={internal} />
+        )}
       </div>
 
       <aside className="space-y-4">
-        <div className="card p-5 text-sm">
+        <div className="card p-5 text-sm" data-testid="ticket-details">
           <Field label="Reporter">
             {ticket.reporter && (
               <span className="flex items-center gap-2">
@@ -138,126 +169,76 @@ export default function TicketDetail() {
           </Field>
 
           <Field label="Assignee">
-            {admin ? (
-              <Dropdown
-                placeholder="Unassigned"
-                value={ticket.assignee?.id ?? ""}
-                onChange={(v) => update.mutate({ assigneeId: v || null })}
-                options={[
-                  { value: "", label: "Unassigned" },
-                  ...assignable.map((m) => ({ value: m.userId, label: m.name })),
-                ]}
-              />
-            ) : ticket.assignee ? (
-              <span className="flex items-center gap-2">
+            {ticket.assignee ? (
+              <span className="flex items-center gap-2" data-testid="detail-assignee">
                 <Avatar name={ticket.assignee.name} url={ticket.assignee.avatarUrl} size={22} />
                 {ticket.assignee.name}
               </span>
             ) : (
-              <span className="text-muted">Unassigned</span>
-            )}
-            {internal && ticket.assignee?.id !== me?.id && (
-              <button onClick={() => selfAssign.mutate()} className="link mt-1.5 block text-xs">
-                Assign to me
-              </button>
+              <span className="text-muted" data-testid="detail-assignee">Unassigned</span>
             )}
           </Field>
 
           <Field label="Status">
-            {internal ? (
-              <Dropdown
-                value={ticket.status}
-                onChange={(v) => update.mutate({ status: v as any })}
-                options={["OPEN", "IN_PROGRESS", "DONE"].map((s) => ({
-                  value: s,
-                  label: s.replace("_", " "),
-                }))}
-              />
-            ) : (
-              <StatusBadge status={ticket.status} />
-            )}
+            <StatusBadge status={ticket.status} />
           </Field>
 
           {internal && (
-            <>
-              <Field label="Priority">
-                <Dropdown
-                  value={ticket.priority}
-                  onChange={(v) => update.mutate({ priority: v as any })}
-                  options={["LOW", "MEDIUM", "HIGH", "URGENT"].map((p) => ({ value: p, label: p }))}
-                />
-              </Field>
-              <Field label="Due date">
-                <input
-                type="date"
-                className="input"
-                value={ticket.dueDate ? ticket.dueDate.slice(0, 10) : ""}
-                min={todayStr()}
-                onChange={(e) =>
-                  update.mutate({
-                    dueDate: e.target.value ? new Date(e.target.value).toISOString() : null,
-                  })
-                }
-              />
-              </Field>
-            </>
+            <Field label="Priority">
+              <PriorityBadge priority={ticket.priority} />
+            </Field>
           )}
+
+          <Field label="Due date">
+            {ticket.dueDate ? (
+              new Date(ticket.dueDate).toLocaleDateString()
+            ) : (
+              <span className="text-muted">None</span>
+            )}
+          </Field>
+
+          {internal && typeof ticket.followerCount === "number" && (
+            <Field label="Followers">
+              <span data-testid="detail-followers">
+                {ticket.followerCount}
+                {ticket.following && <span className="ml-1.5 text-xs text-muted">(including you)</span>}
+              </span>
+            </Field>
+          )}
+
+          <Field label="Created">
+            <span className="text-fg-soft">{new Date(ticket.createdAt).toLocaleString()}</span>
+          </Field>
         </div>
 
-        {internal && (
-        <button
-          onClick={() => setConfirmingClose(true)}
-          disabled={ticket.status === "DONE" || update.isPending}
-          className="btn btn-secondary btn-sm btn-block"
-        >
-          <IconCheckCircle size={14} />
-          {ticket.status === "DONE" ? "Closed" : update.isPending ? "Closing…" : "Close ticket"}
-        </button>
-      )}
-        {canDeleteTicket && (
+        {can?.changeStatus && (
           <button
-            onClick={() => setConfirmingDelete(true)}
-            className="btn btn-danger btn-sm btn-block"
+            onClick={() => setConfirmingClose(true)}
+            disabled={ticket.status === "DONE" || update.isPending}
+            className="btn btn-secondary btn-sm btn-block"
           >
-            <IconTrash size={14} />
-            Delete ticket
+            <IconCheckCircle size={14} />
+            {ticket.status === "DONE" ? "Closed" : update.isPending ? "Closing…" : "Close ticket"}
           </button>
         )}
       </aside>
 
       <ConfirmModal
-        open={confirmingDelete}
-        title="Delete ticket?"
+        open={confirmingClose}
+        title="Close ticket?"
         message={
           <>
-            This will permanently delete <span className="font-medium">"{ticket.title}"</span> and
-            all of its comments and attachments.
+            This will mark <span className="font-medium">"{ticket.title}"</span> as Done.
           </>
         }
-        pending={deleteTicket.isPending}
-        onConfirm={() => deleteTicket.mutate()}
-        onClose={() => setConfirmingDelete(false)}
+        confirmLabel="Close ticket"
+        variant="primary"
+        pending={update.isPending}
+        onConfirm={() =>
+          update.mutate({ status: "DONE" }, { onSuccess: () => setConfirmingClose(false) })
+        }
+        onClose={() => setConfirmingClose(false)}
       />
-
-      <ConfirmModal
-      open={confirmingClose}
-      title="Close ticket?"
-      message={
-        <>
-          This will mark <span className="font-medium">"{ticket.title}"</span> as Done.
-        </>
-      }
-      confirmLabel="Close ticket"
-      variant="primary"
-      pending={update.isPending}
-      onConfirm={() =>
-        update.mutate(
-          { status: "DONE" },
-          { onSuccess: () => setConfirmingClose(false) },
-        )
-      }
-      onClose={() => setConfirmingClose(false)}
-    />
     </div>
   );
 }
@@ -270,130 +251,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     </div>
   );
 }
-
-function CommentThread({
-  comments,
-  ticketId,
-  canDelete,
-  memberNames,
-  onDeleted,
-}: {
-  comments: Comment[];
-  ticketId: string;
-  canDelete: (c: Comment) => boolean;
-  memberNames: string[];
-  onDeleted: () => void;
-}) {
-  const roots = comments.filter((c) => !c.parentId);
-  const repliesOf = (pid: string) => comments.filter((c) => c.parentId === pid);
-
-  if (comments.length === 0)
-    return <p className="mb-4 text-sm text-muted">No comments yet.</p>;
-
-  return (
-    <div className="mb-4 space-y-3">
-      {roots.map((c) => (
-        <div key={c.id}>
-          <CommentCard
-            comment={c}
-            ticketId={ticketId}
-            canDelete={canDelete(c)}
-            hasReplies={repliesOf(c.id).length > 0}
-            memberNames={memberNames}
-            onDeleted={onDeleted}
-          />
-          <div className="ml-8 mt-2 space-y-2">
-            {repliesOf(c.id).map((r) => (
-              <CommentCard
-                key={r.id}
-                comment={r}
-                ticketId={ticketId}
-                canDelete={canDelete(r)}
-                hasReplies={false}
-                memberNames={memberNames}
-                onDeleted={onDeleted}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function CommentCard({
-  comment,
-  ticketId,
-  canDelete,
-  hasReplies,
-  memberNames,
-  onDeleted,
-}: {
-  comment: Comment;
-  ticketId: string;
-  canDelete: boolean;
-  hasReplies: boolean;
-  memberNames: string[];
-  onDeleted: () => void;
-}) {
-  const internal = comment.visibility === "INTERNAL";
-  const [confirming, setConfirming] = useState(false);
-
-  const del = useMutation({
-    mutationFn: () => api.deleteComment(ticketId, comment.id),
-    onSuccess: () => {
-      setConfirming(false);
-      onDeleted();
-    },
-  });
-
-  const extras = [
-    ...(hasReplies ? ["replies"] : []),
-    ...(comment.attachments?.length ? ["images"] : []),
-  ];
-
-  return (
-    <div className={internal ? "alert alert-ok" : "card p-4"} style={internal ? {} : undefined}>
-      <div className="mb-1.5 flex items-center gap-2">
-        <Avatar name={comment.author.name} url={comment.author.avatarUrl} size={24} />
-        <span className="text-sm font-semibold text-fg">{comment.author.name}</span>
-        {internal && <span className="badge b-warn">Internal</span>}
-        <span className="ml-auto text-[11px] text-muted">
-          {new Date(comment.createdAt).toLocaleString()}
-        </span>
-        {canDelete && (
-          <button onClick={() => setConfirming(true)} className="link link-danger text-xs">
-            Delete
-          </button>
-        )}
-      </div>
-      <ConfirmModal
-        open={confirming}
-        title="Delete comment?"
-        message={
-          extras.length
-            ? `Are you sure you want to delete this comment? Its ${extras.join(" and ")} will also be deleted.`
-            : "Are you sure you want to delete this comment?"
-        }
-        pending={del.isPending}
-        onConfirm={() => del.mutate()}
-        onClose={() => setConfirming(false)}
-      />
-      <p className="whitespace-pre-wrap text-sm text-fg-soft">
-        {renderWithMentions(comment.body, memberNames)}
-      </p>
-      {comment.attachments && comment.attachments.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-2">
-          {comment.attachments.map((a) => (
-            <CommentImage key={a.id} att={a} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Highlight "@Name" tokens (known member names only) inside a comment body. */
 function renderWithMentions(body: string, memberNames: string[]) {
   if (memberNames.length === 0) return body;
   const escaped = [...memberNames]
@@ -408,175 +265,5 @@ function renderWithMentions(body: string, memberNames: string[]) {
     ) : (
       part
     ),
-  );
-}
-
-function CommentImage({ att }: { att: CommentAttachment }) {
-  const [url, setUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    let revoke: string | null = null;
-    api.attachmentBlob(att.id).then((blob) => {
-      revoke = URL.createObjectURL(blob);
-      setUrl(revoke);
-    });
-    return () => {
-      if (revoke) URL.revokeObjectURL(revoke);
-    };
-  }, [att.id]);
-
-  if (!url) {
-    return <div className="h-28 w-36 rounded-lg border border-card-border bg-accent pulse" />;
-  }
-  return (
-    <a href={url} target="_blank" rel="noreferrer" title={att.filename}>
-      <img
-        src={url}
-        alt={att.filename}
-        className="h-28 max-w-56 rounded-lg border border-card-border object-cover transition-shadow hover:shadow-elevated"
-      />
-    </a>
-  );
-}
-
-function CommentForm({
-  ticketId,
-  canPostInternal,
-  members,
-  onPosted,
-}: {
-  ticketId: string;
-  canPostInternal: boolean;
-  members: MentionMember[];
-  onPosted: () => void;
-}) {
-  const [body, setBody] = useState("");
-  const [visibility, setVisibility] = useState<CommentVisibility>(
-    canPostInternal ? "INTERNAL" : "CLIENT_VISIBLE",
-  );
-  const [images, setImages] = useState<File[]>([]);
-  const [picked, setPicked] = useState<MentionMember[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  const mut = useMutation({
-    mutationFn: async () => {
-      const comment = await api.addComment(ticketId, {
-        body,
-        visibility,
-        mentions: extractMentionIds(body, picked),
-      });
-      for (const file of images) {
-        await api.uploadAttachment(ticketId, file, visibility, comment.id);
-      }
-    },
-    onSuccess: () => {
-      setBody("");
-      setImages([]);
-      setPicked([]);
-      setError(null);
-      onPosted();
-    },
-    onError: (e: any) => {
-      setError(e?.response?.data?.error ?? "Failed to post comment");
-      onPosted(); // the comment may exist even if an upload failed
-    },
-  });
-
-  const MAX_IMAGES = 10;
-
-  function onPickImages(e: React.ChangeEvent<HTMLInputElement>) {
-    const picked = Array.from(e.target.files ?? []).filter((f) => f.type.startsWith("image/"));
-    if (picked.length) {
-      const overflow = images.length + picked.length > MAX_IMAGES;
-      setImages([...images, ...picked].slice(0, MAX_IMAGES));
-      setError(overflow ? `Max ${MAX_IMAGES} images per comment` : null);
-    }
-    e.target.value = "";
-  }
-
-  return (
-    <div className="card p-4">
-      <MentionTextarea
-        rows={3}
-        placeholder="Write a comment… (@ to mention)"
-        value={body}
-        onChange={setBody}
-        members={members}
-        onMention={(m) => setPicked((prev) => [...prev, m])}
-      />
-      {images.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-2">
-          {images.map((file, i) => (
-            <ImagePreview key={i} file={file} onRemove={() => setImages(images.filter((_, j) => j !== i))} />
-          ))}
-        </div>
-      )}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {canPostInternal && (
-          <Dropdown
-            className="w-52"
-            size="sm"
-            value={visibility}
-            onChange={(v) => setVisibility(v as CommentVisibility)}
-            options={[
-              { value: "INTERNAL", label: "Internal (team only)" },
-              { value: "CLIENT_VISIBLE", label: "Client-visible" },
-            ]}
-          />
-        )}
-        <label
-          className={`btn btn-secondary btn-sm ${images.length >= MAX_IMAGES ? "opacity-50" : "cursor-pointer"}`}
-        >
-          <IconUpload size={14} />
-          Attach images
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={onPickImages}
-            disabled={mut.isPending || images.length >= MAX_IMAGES}
-          />
-        </label>
-        {error && <span className="text-sm text-danger">{error}</span>}
-        <button
-          disabled={!body || mut.isPending}
-          onClick={() => mut.mutate()}
-          className="btn btn-primary btn-sm ml-auto"
-        >
-          {mut.isPending ? "Posting…" : "Comment"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ImagePreview({ file, onRemove }: { file: File; onRemove: () => void }) {
-  const [url, setUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    const u = URL.createObjectURL(file);
-    setUrl(u);
-    return () => URL.revokeObjectURL(u);
-  }, [file]);
-
-  return (
-    <div className="relative">
-      {url && (
-        <img
-          src={url}
-          alt={file.name}
-          title={file.name}
-          className="h-20 w-24 rounded-lg border border-card-border object-cover"
-        />
-      )}
-      <button
-        onClick={onRemove}
-        title="Remove"
-        className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-card-border bg-white text-xs leading-none text-muted hover:text-danger"
-      >
-        ×
-      </button>
-    </div>
   );
 }

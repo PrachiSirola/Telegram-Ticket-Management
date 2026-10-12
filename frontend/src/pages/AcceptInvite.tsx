@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useAuth } from "../auth";
+import { rememberJoinedOrg } from "../org";
 import { PasswordInput } from "../components/PasswordInput";
 
 export default function AcceptInvite() {
@@ -31,6 +32,8 @@ export default function AcceptInvite() {
   const [busy, setBusy] = useState(false);
 
   async function finish() {
+    // Land in the organisation this invite belongs to, not whichever one was open before.
+    if (invite?.orgId) rememberJoinedOrg(invite.orgId);
     await refresh();
     await qc.invalidateQueries({ queryKey: ["orgs"] });
     navigate("/");

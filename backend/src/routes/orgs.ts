@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireOrgRole } from "../middleware/org.js";
-import { isOrgSA, orgRole, isPlatformSuperAdmin } from "../lib/access.js";
+import { isOrgSA, orgRole, canCreateOrganisation } from "../lib/access.js";
 import {
   InvalidOrgCreationTokenError,
   NotPlatformAdminError,
@@ -12,6 +12,7 @@ import {
 } from "../lib/orgCreation.js";
 import { orgCreationVerifyEmail, sendEmail } from "../lib/email.js";
 import { env } from "../env.js";
+import { paginate, parsePageParams, TICKET_TIEBREAK } from "../lib/pagination.js";
 
 export const orgsRouter = Router();
 
@@ -50,15 +51,14 @@ orgsRouter.get("/", requireAuth, async (req, res) => {
 });
 
 // Create a new organisation — a two-step, email-confirmed flow restricted to
-// the single fixed platform Super Admin (see lib/access.ts isPlatformSuperAdmin).
-// Ordinary org SUPER_ADMIN/ADMIN/CLIENT roles no longer qualify — this is not
-// self-service. Step 1 here just sends the confirmation email; the org is
+// Super Admins (see lib/access.ts canCreateOrganisation). Admins, Developers
+// and Clients are refused here regardless of what the UI shows. Step 1 here just sends the confirmation email; the org is
 // only actually created once that link is clicked (see /create/verify below).
 const createRequestSchema = z.object({ name: z.string().min(1).max(100) });
 orgsRouter.post("/create/request", requireAuth, async (req, res) => {
-  if (!isPlatformSuperAdmin(req.user!)) {
+  if (!canCreateOrganisation(req.user!)) {
     return res.status(403).json({
-      error: "Only the platform Super Admin can create organisations.",
+      error: "Only a Super Admin can create organisations.",
     });
   }
   const parsed = createRequestSchema.safeParse(req.body);
@@ -82,7 +82,7 @@ orgsRouter.post("/create/verify", requireAuth, async (req, res) => {
   const parsed = createVerifySchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Missing verification token." });
   try {
-    const { org } = await verifyAndCreateOrg(parsed.data.token);
+    const { org } = await verifyAndCreateOrg(parsed.data.token, req.user!.id);
     res.status(201).json({ id: org.id, name: org.name, role: "SUPER_ADMIN" });
   } catch (err) {
     if (err instanceof InvalidOrgCreationTokenError) return res.status(400).json({ error: err.message });
@@ -258,6 +258,13 @@ orgsRouter.get(
 );
 
 
+const emptyToUndef = (v: unknown) => (v === "" ? undefined : v);
+const memberTicketFilterSchema = z.object({
+  status: z.preprocess(emptyToUndef, z.enum(["OPEN", "IN_PROGRESS", "DONE"]).optional()),
+  priority: z.preprocess(emptyToUndef, z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional()),
+  type: z.preprocess(emptyToUndef, z.enum(["BUG", "FEATURE", "TASK"]).optional()),
+});
+
 const ticketUserSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
 const memberTicketInclude = {
   assignee: ticketUserSelect,
@@ -316,7 +323,7 @@ orgsRouter.get(
 
     const counts = await prisma.ticket.groupBy({
       by: ["status"],
-      where: { assigneeId: membership.userId, project: { orgId } },
+      where: { assigneeId: membership.userId, archivedAt: null, project: { orgId } },
       _count: true,
     });
     const ticketCounts = { OPEN: 0, IN_PROGRESS: 0, DONE: 0 };
@@ -349,33 +356,35 @@ orgsRouter.get(
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
   async (req, res) => {
     const orgId = req.params.orgId;
-    const { status, priority, type } = req.query as Record<string, string>;
+    const filters = memberTicketFilterSchema.safeParse(req.query);
+    if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
+    const { status, priority, type } = filters.data;
 
     const where = {
       assigneeId: req.params.userId,
+      archivedAt: null,
       project: { orgId },
-      ...(status ? { status: status as any } : {}),
-      ...(priority ? { priority: priority as any } : {}),
-      ...(type ? { type: type as any } : {}),
+      ...(status ? { status } : {}),
+      ...(priority ? { priority } : {}),
+      ...(type ? { type } : {}),
     };
 
-    const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
-    const pageSize = Math.min(
-      50,
-      Math.max(1, parseInt(String(req.query.pageSize ?? "10"), 10) || 10),
+    // Always paginated (existing behaviour). Default page size stays 10 for
+    // callers that don't send one; max is now 100 to match the UI options.
+    // `id` tiebreak keeps the order total so pages never overlap/skip.
+    const paged = await paginate(
+      parsePageParams(req.query, 10),
+      () => prisma.ticket.count({ where }),
+      (skip, take) =>
+        prisma.ticket.findMany({
+          where,
+          include: memberTicketInclude,
+          orderBy: [{ updatedAt: "desc" }, TICKET_TIEBREAK],
+          skip,
+          take,
+        }),
     );
-
-    const [items, total] = await prisma.$transaction([
-      prisma.ticket.findMany({
-        where,
-        include: memberTicketInclude,
-        orderBy: [{ updatedAt: "desc" }],
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-      }),
-      prisma.ticket.count({ where }),
-    ]);
-    res.json({ items: items.map(serializeMemberTicket), total, page, pageSize });
+    res.json({ ...paged, items: paged.items.map(serializeMemberTicket) });
   },
 );
 

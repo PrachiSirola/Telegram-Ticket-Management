@@ -1,6 +1,8 @@
 import axios from "axios";
 import type {
+  ActivityItem,
   Attachment,
+  AttachmentVisibility,
   Comment,
   CommentVisibility,
   InviteInfo,
@@ -17,9 +19,12 @@ import type {
   ProjectCounts,
   ProjectStatusFilter,
   Ticket,
+  TicketPage,
   TicketPriority,
+  TeamMember,
   TicketStatus,
   TicketType,
+  UserLite,
   WorkRange,
   WorkStatusFilter,
 } from "../types";
@@ -92,9 +97,6 @@ export const api = {
   // --- Members ---
   orgMembers: (orgId: string) =>
     http.get<OrgMember[]>(`/orgs/${orgId}/members`).then((r) => r.data),
-  // Opt-in pagination, same convention as projectsPaged above. Used by the
-  // Members page's list; OrgSettings' ownership-transfer picker keeps using
-  // orgMembers() for the complete list.
   orgMembersPaged: (orgId: string, params: { page: number; pageSize: number; q?: string }) =>
     http
       .get<Paged<OrgMember>>(`/orgs/${orgId}/members`, {
@@ -108,7 +110,6 @@ export const api = {
   ) => http.patch(`/orgs/${orgId}/members/${userId}`, data).then((r) => r.data),
   removeMember: (orgId: string, userId: string) =>
     http.delete(`/orgs/${orgId}/members/${userId}`).then((r) => r.data),
-  // Member Detail page: profile + project access + assigned-ticket breakdown.
   memberDetail: (orgId: string, userId: string) =>
     http.get(`/orgs/${orgId}/members/${userId}/detail`).then((r) => r.data),
   memberTickets: (
@@ -116,7 +117,9 @@ export const api = {
     userId: string,
     params: { status?: string; priority?: string; type?: string; page: number; pageSize: number },
   ) =>
-    http.get(`/orgs/${orgId}/members/${userId}/tickets`, { params }).then((r) => r.data),
+    http
+      .get<TicketPage<Ticket>>(`/orgs/${orgId}/members/${userId}/tickets`, { params })
+      .then((r) => r.data),
 
   // --- Invites ---
   invites: (orgId: string) =>
@@ -131,10 +134,6 @@ export const api = {
   // --- Projects ---
   projects: (orgId: string) =>
     http.get<Project[]>(`/orgs/${orgId}/projects`).then((r) => r.data),
-  // Opt-in pagination: same endpoint, but passing page/pageSize gets back a
-  // { items, total, page, pageSize } envelope instead of the plain array.
-  // Used by the Dashboard's paginated project grid; every other caller keeps
-  // using `projects()` above and is unaffected.
   projectsPaged: (
     orgId: string,
     params: { page: number; pageSize: number; status?: ProjectStatusFilter; q?: string },
@@ -144,8 +143,6 @@ export const api = {
         params: { page: params.page, pageSize: params.pageSize, status: params.status, q: params.q || undefined },
       })
       .then((r) => r.data),
-  // Live counts for the All/Active/Closed tab bar — derived from ticket
-  // state server-side, not stored, so they're always accurate.
   projectCounts: (orgId: string) =>
     http.get<ProjectCounts>(`/orgs/${orgId}/projects/counts`).then((r) => r.data),
   createProject: (orgId: string, data: { name: string; description?: string }) =>
@@ -180,6 +177,21 @@ export const api = {
   tickets: (orgId: string, projectId: string, params?: Record<string, string>) =>
     http
       .get<Ticket[]>(`/orgs/${orgId}/projects/${projectId}/tickets`, { params })
+      .then((r) => r.data),
+
+  ticketsPaged: (
+    orgId: string,
+    projectId: string,
+    params: {
+      status?: string;
+      priority?: string;
+      type?: string;
+      page: number;
+      pageSize: number;
+    },
+  ) =>
+    http
+      .get<TicketPage<Ticket>>(`/orgs/${orgId}/projects/${projectId}/tickets`, { params })
       .then((r) => r.data),
   createTicket: (
     orgId: string,
@@ -220,32 +232,81 @@ export const api = {
     ticketId: string,
     data: { body: string; visibility?: CommentVisibility; parentId?: string | null; mentions?: string[] },
   ) => http.post<Comment>(`/tickets/${ticketId}/comments`, data).then((r) => r.data),
+  editComment: (ticketId: string, commentId: string, body: string) =>
+    http.patch<Comment>(`/tickets/${ticketId}/comments/${commentId}`, { body }).then((r) => r.data),
   deleteComment: (ticketId: string, commentId: string) =>
     http.delete(`/tickets/${ticketId}/comments/${commentId}`).then((r) => r.data),
 
   // --- Attachments ---
   attachments: (ticketId: string) =>
     http.get<Attachment[]>(`/tickets/${ticketId}/attachments`).then((r) => r.data),
-  uploadAttachment: (
+  uploadAttachments: (
     ticketId: string,
-    file: File,
-    visibility: CommentVisibility,
-    commentId?: string,
+    files: File[],
+    opts: {
+      visibility: AttachmentVisibility;
+      selectedUserIds?: string[];
+      commentId?: string;
+      onProgress?: (percent: number) => void;
+    },
   ) => {
     const form = new FormData();
-    form.append("file", file);
-    form.append("visibility", visibility);
-    if (commentId) form.append("commentId", commentId);
-    return http.post<Attachment>(`/tickets/${ticketId}/attachments`, form).then((r) => r.data);
+    form.append("visibility", opts.visibility);
+    if (opts.selectedUserIds?.length) form.append("selectedUserIds", JSON.stringify(opts.selectedUserIds));
+    if (opts.commentId) form.append("commentId", opts.commentId);
+    for (const f of files) form.append("files", f);
+    return http
+      .post<Attachment[]>(`/tickets/${ticketId}/attachments`, form, {
+        onUploadProgress: (e) => {
+          if (e.total) opts.onProgress?.(Math.min(100, Math.round((e.loaded / e.total) * 100)));
+        },
+      })
+      .then((r) => r.data);
   },
-  attachmentBlob: (attId: string) =>
-    http.get(`/attachments/${attId}/download`, { responseType: "blob" }).then((r) => r.data as Blob),
+  /** "preview" = inline (images/PDF), "download" = forced attachment. Both enforce visibility server-side. */
+  attachmentBlob: (attId: string, mode: "preview" | "download" = "preview") =>
+    http.get(`/attachments/${attId}/${mode}`, { responseType: "blob" }).then((r) => r.data as Blob),
   deleteAttachment: (attId: string) =>
     http.delete(`/attachments/${attId}`).then((r) => r.data),
+  updateAttachmentVisibility: (
+    attId: string,
+    data: { visibility: AttachmentVisibility; selectedUserIds?: string[] },
+  ) => http.patch<Attachment>(`/attachments/${attId}`, data).then((r) => r.data),
 
-  // --- Me / notifications ---
+  // --- Collaboration: activity, followers, ticket actions ---
+  ticketActivity: (ticketId: string, params: { page: number; pageSize: number }) =>
+    http
+      .get<TicketPage<ActivityItem>>(`/tickets/${ticketId}/activity`, { params })
+      .then((r) => r.data),
+  ticketMembers: (ticketId: string) =>
+    http.get<TeamMember[]>(`/tickets/${ticketId}/members`).then((r) => r.data),
+  followers: (ticketId: string) =>
+    http.get<UserLite[]>(`/tickets/${ticketId}/followers`).then((r) => r.data),
+  addFollower: (ticketId: string, userId?: string) =>
+    http.post(`/tickets/${ticketId}/followers`, userId ? { userId } : {}).then((r) => r.data),
+  removeFollower: (ticketId: string, userId: string) =>
+    http.delete(`/tickets/${ticketId}/followers/${userId}`).then((r) => r.data),
+  duplicateTicket: (ticketId: string) =>
+    http
+      .post<{ id: string; projectId: string; title: string }>(`/tickets/${ticketId}/duplicate`)
+      .then((r) => r.data),
+  moveTicket: (ticketId: string, projectId: string) =>
+    http.post(`/tickets/${ticketId}/move`, { projectId }).then((r) => r.data),
+  archiveTicket: (ticketId: string) =>
+    http.post(`/tickets/${ticketId}/archive`).then((r) => r.data),
+  restoreTicket: (ticketId: string) =>
+    http.post(`/tickets/${ticketId}/restore`).then((r) => r.data),
+
   myTickets: (orgId: string, filter: "assigned" | "reported" = "assigned") =>
     http.get<Ticket[]>("/me/tickets", { params: { orgId, filter } }).then((r) => r.data),
+  myTicketsPaged: (
+    orgId: string,
+    filter: "assigned" | "reported",
+    params: { page: number; pageSize: number },
+  ) =>
+    http
+      .get<TicketPage<Ticket>>("/me/tickets", { params: { orgId, filter, ...params } })
+      .then((r) => r.data),
   myWork: (
     orgId: string,
     params: {

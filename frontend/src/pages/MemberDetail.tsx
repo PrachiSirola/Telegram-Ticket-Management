@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -6,7 +6,8 @@ import { isAdminOrAboveIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { Avatar } from "../components/ui";
 import { Dropdown } from "../components/Dropdown";
-import { Pagination } from "../components/Pagination";
+import { TablePagination } from "../components/TablePagination";
+import { useListParams } from "../lib/useListParams";
 import { TicketRow } from "../components/TicketRow";
 import { IconArrowLeft, IconFolder, IconTicket, IconClock, IconCheckCircle } from "../components/Icons";
 
@@ -15,21 +16,15 @@ const PRIORITY_OPTS = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 const TYPE_OPTS = ["BUG", "FEATURE", "TASK"];
 const opt = (v: string) => ({ value: v, label: v.replace("_", " ") });
 
-const PAGE_SIZE = 10;
-
 export default function MemberDetail() {
   const { userId = "" } = useParams();
   const { me } = useAuth();
   const { activeOrgId } = useOrg();
   const admin = isAdminOrAboveIn(me, activeOrgId);
-
-  const [filters, setFilters] = useState<Record<string, string>>({});
-  const [page, setPage] = useState(1);
-
-  function setFilter(k: string, v: string) {
-    setFilters((f) => ({ ...f, [k]: v }));
-    setPage(1);
-  }
+  const { filters, page, pageSize, setFilter, setPage, setPageSize, clearFilters } = useListParams({
+    filters: { status: STATUS_OPTS, priority: PRIORITY_OPTS, type: TYPE_OPTS },
+  });
+  const listTop = useRef<HTMLDivElement>(null);
 
   const { data: detail, isLoading: detailLoading } = useQuery({
     queryKey: ["memberDetail", activeOrgId, userId],
@@ -38,16 +33,33 @@ export default function MemberDetail() {
   });
 
   const activeFilters = Object.fromEntries(Object.entries(filters).filter(([, v]) => v));
-  const { data: paged, isLoading: ticketsLoading } = useQuery({
-    queryKey: ["memberTickets", activeOrgId, userId, activeFilters, page],
+  const {
+    data: paged,
+    isLoading: ticketsLoading,
+    isFetching: ticketsFetching,
+    isPlaceholderData,
+    isError: ticketsError,
+    refetch: refetchTickets,
+  } = useQuery({
+    queryKey: ["memberTickets", activeOrgId, userId, activeFilters, page, pageSize],
     queryFn: () =>
       api.memberTickets(activeOrgId, userId, {
         ...activeFilters,
         page,
-        pageSize: PAGE_SIZE,
+        pageSize,
       }),
     enabled: !!activeOrgId && !!userId && admin,
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === userId ? prev : undefined),
   });
+  const hasFilters = Object.keys(activeFilters).length > 0;
+  useEffect(() => {
+    if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
+  }, [paged, isPlaceholderData, page, setPage]);
+
+  function goToPage(next: number) {
+    setPage(next);
+    listTop.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   if (!admin) return <Navigate to="/" replace />;
 
@@ -130,11 +142,34 @@ export default function MemberDetail() {
               </div>
             </div>
 
-            <div className="card divide-line overflow-hidden">
+            <div ref={listTop} className="scroll-mt-4" />
+            <div
+              className={`card divide-line overflow-hidden transition-opacity ${
+                ticketsFetching && !ticketsLoading ? "opacity-60" : ""
+              }`}
+              aria-busy={ticketsFetching}
+            >
               {ticketsLoading && <div className="p-6 text-sm text-muted">Loading…</div>}
+              {ticketsError && !paged && (
+                <div className="p-10 text-center text-sm">
+                  <p className="text-danger">Couldn't load tickets.</p>
+                  <button className="btn btn-secondary btn-sm mt-3" onClick={() => refetchTickets()}>
+                    Try again
+                  </button>
+                </div>
+              )}
               {!ticketsLoading && paged?.items.length === 0 && (
                 <div className="p-10 text-center text-sm text-muted">
-                  No tickets match these filters.
+                  {hasFilters ? (
+                    <>
+                      <p>No tickets match these filters.</p>
+                      <button className="btn btn-secondary btn-sm mt-3" onClick={clearFilters}>
+                        Clear filters
+                      </button>
+                    </>
+                  ) : (
+                    "No tickets assigned."
+                  )}
                 </div>
               )}
               {paged?.items.map((t: any) => (
@@ -142,8 +177,15 @@ export default function MemberDetail() {
               ))}
             </div>
 
-            {paged && paged.total > 0 && (
-              <Pagination page={paged.page} total={paged.total} pageSize={paged.pageSize} onPageChange={setPage} />
+            {paged && (
+              <TablePagination
+                page={paged.page}
+                pageSize={paged.pageSize}
+                total={paged.total}
+                busy={ticketsFetching}
+                onPageChange={goToPage}
+                onPageSizeChange={setPageSize}
+              />
             )}
           </section>
         </>

@@ -358,6 +358,55 @@
     white-space: nowrap;
   }
 
+  /* --- Markdown (comments) --- */
+  .md-code {
+    background: var(--accent);
+    border: 1px solid var(--card-border);
+    border-radius: 4px;
+    padding: 0 4px;
+    font-size: 0.85em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .md-pre {
+    background: var(--accent);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .md-quote {
+    border-left: 3px solid var(--card-border);
+    padding-left: 12px;
+    color: var(--muted);
+  }
+  .md-list { padding-left: 1.25rem; }
+
+  /* --- File drop zone --- */
+  .dropzone {
+    border: 2px dashed var(--card-border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .dropzone.active {
+    border-color: var(--primary);
+    background: var(--accent);
+  }
+  .progress-track {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--card-border);
+    overflow: hidden;
+  }
+  .progress-bar {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--primary);
+    transition: width 0.15s linear;
+  }
+
   /* --- Avatar --- */
   .avatar {
     display: inline-flex;

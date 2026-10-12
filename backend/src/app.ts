@@ -12,12 +12,10 @@ import { projectsRouter } from "./routes/projects.js";
 import { projectTicketsRouter, ticketsRouter } from "./routes/tickets.js";
 import { commentsRouter } from "./routes/comments.js";
 import { attachmentsRouter, attachmentFileRouter } from "./routes/attachments.js";
+import { ticketActionsRouter } from "./routes/ticketActions.js";
 
 export function createApp() {
   const app = express();
-
-  // Behind Render's (or any) reverse proxy, trust X-Forwarded-* so req.secure
-  // and req.protocol reflect the original HTTPS request.
   if (env.isProd) app.set("trust proxy", 1);
 
   app.use(
@@ -53,8 +51,6 @@ export function createApp() {
   );
   app.use(express.json());
   app.use(cookieParser());
-
-  // Attach req.user (if logged in) to every request.
   app.use(loadUser);
 
   app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -70,9 +66,8 @@ export function createApp() {
   app.use("/tickets", ticketsRouter);
   app.use("/tickets/:id/comments", commentsRouter);
   app.use("/tickets/:id/attachments", attachmentsRouter);
+  app.use("/tickets/:id", ticketActionsRouter);
   app.use("/attachments", attachmentFileRouter);
-
-  // Central error handler.
   app.use(
     (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       console.error("[error]", err);
