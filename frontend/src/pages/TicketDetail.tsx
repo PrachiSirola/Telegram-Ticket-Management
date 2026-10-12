@@ -1,5 +1,7 @@
+import { humanize, q, toast } from "../lib/toast";
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
+import { BackLink } from "../components/BackLink";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { isInternalIn, useAuth } from "../auth";
@@ -14,11 +16,14 @@ import { IconArchive, IconCheckCircle } from "../components/Icons";
 
 export default function TicketDetail() {
   const { id = "" } = useParams();
+  const location = useLocation();
   const { me } = useAuth();
   const { activeOrgId, setActiveOrg } = useOrg();
   const qc = useQueryClient();
   const [confirmingClose, setConfirmingClose] = useState(false);
   const [tab, setTab] = useState<"comments" | "activity">("comments");
+
+  // Moving between tickets (e.g. after Duplicate) starts on Comments again.
   useEffect(() => setTab("comments"), [id]);
 
   const { data: ticket, isLoading, isError, error } = useQuery({
@@ -26,6 +31,9 @@ export default function TicketDetail() {
     queryFn: () => api.ticket(id),
     retry: (n, e: any) => e?.response?.status !== 404 && n < 2,
   });
+
+  // Cross-org notification clicks land here with a different active org —
+  // sync the switcher to the ticket's org.
   const ticketOrgId = ticket?.orgId ?? "";
   useEffect(() => {
     if (ticketOrgId && ticketOrgId !== activeOrgId) setActiveOrg(ticketOrgId);
@@ -36,6 +44,7 @@ export default function TicketDetail() {
     queryFn: () => api.projectMembers(ticketOrgId, ticket!.projectId),
     enabled: !!ticket && !!ticketOrgId,
   });
+  // Same key as <Comments/> — only used here for the tab's count.
   const { data: comments } = useQuery({
     queryKey: ["comments", id],
     queryFn: () => api.comments(id),
@@ -44,7 +53,12 @@ export default function TicketDetail() {
 
   const update = useMutation({
     mutationFn: (data: Parameters<typeof api.updateTicket>[1]) => api.updateTicket(id, data),
-    onSuccess: () => {
+    meta: { errorTitle: "Couldn't update the ticket" },
+    onMutate: () => ({ title: ticket?.title ?? "", status: ticket?.status }),
+    onSuccess: (_res, data, before) => {
+      if (data.status && before)
+        toast.success(`Ticket ${q(before.title)} status changed from ${humanize(before.status)} to ${humanize(data.status)}.`);
+      else toast.success(`Ticket ${q(before?.title)} was updated.`);
       qc.invalidateQueries({ queryKey: ["ticket", id] });
       qc.invalidateQueries({ queryKey: ["activity", id] });
       qc.invalidateQueries({ queryKey: ["tickets"] });
@@ -71,7 +85,8 @@ export default function TicketDetail() {
 
   const orgId = ticket.orgId ?? "";
   const internal = isInternalIn(me, orgId);
-  const archived = !!ticket.archivedAt;
+  const projectArchived = !!ticket.project?.archivedAt;
+  const archived = !!ticket.archivedAt || projectArchived;
   const projectMembers = members ?? [];
   const assignable = projectMembers.filter((m) => m.role !== "CLIENT");
   const memberNames = projectMembers.map((m) => m.name);
@@ -80,10 +95,12 @@ export default function TicketDetail() {
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_280px]">
       <div className="min-w-0">
+        <BackLink className="mb-2" />
         {/* Breadcrumb */}
         {ticket.project && (
           <div className="mb-3 text-sm text-muted">
-            <Link to={`/projects/${ticket.projectId}`} className="link text-sm">
+            {/* keeps the "Back to <member>" state when going up to the project */}
+            <Link to={`/projects/${ticket.projectId}`} state={location.state} className="link text-sm">
               {ticket.project.name}
             </Link>
             <span className="mx-1.5">›</span>
@@ -91,7 +108,18 @@ export default function TicketDetail() {
           </div>
         )}
 
-        {archived && (
+        {projectArchived && (
+          <div className="alert mb-4 flex items-start gap-2 text-sm" role="status" data-testid="project-archived-banner">
+            <IconArchive size={16} className="mt-0.5 shrink-0" />
+            <div>
+              <span className="font-semibold text-fg">This project is archived.</span>{" "}
+              <span className="text-fg-soft">
+                Its tickets are read-only until an admin restores the project.
+              </span>
+            </div>
+          </div>
+        )}
+        {!projectArchived && archived && (
           <div className="alert mb-4 flex items-start gap-2 text-sm" role="status" data-testid="archived-banner">
             <IconArchive size={16} className="mt-0.5 shrink-0" />
             <div>
@@ -109,7 +137,7 @@ export default function TicketDetail() {
           <StatusBadge status={ticket.status} />
           <PriorityBadge priority={ticket.priority} />
           <TypeBadge type={ticket.type} />
-          {archived && <span className="badge b-outline-muted">Archived</span>}
+          {ticket.archivedAt && <span className="badge b-outline-muted">Archived</span>}
         </div>
 
         <TicketActions
@@ -251,6 +279,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     </div>
   );
 }
+
+/** Highlight "@Name" tokens (known member names only) inside the description. */
 function renderWithMentions(body: string, memberNames: string[]) {
   if (memberNames.length === 0) return body;
   const escaped = [...memberNames]

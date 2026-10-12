@@ -13,11 +13,6 @@ declare global {
   }
 }
 
-/**
- * Enforces that the authenticated user is an active member of the org named in
- * req.params.orgId. This is the central isolation guard — every org-scoped
- * route must pass through it. 404 (not 403) so we don't leak org existence.
- */
 export function requireOrgAccess(req: Request, res: Response, next: NextFunction) {
   const orgId = req.params.orgId;
   if (!req.user) return res.status(401).json({ error: "Not authenticated" });
@@ -39,12 +34,6 @@ export function requireOrgRole(...roles: OrgRole[]) {
     next();
   };
 }
-
-/**
- * Loads req.params.projectId, verifies it belongs to req.params.orgId, and —
- * for CLIENT members — that they are attached to the project. Attaches
- * req.project. Run after requireOrgAccess.
- */
 export async function requireProjectAccess(req: Request, res: Response, next: NextFunction) {
   const { orgId, projectId } = req.params;
   const project = await prisma.project.findUnique({ where: { id: projectId } });

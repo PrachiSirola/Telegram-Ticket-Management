@@ -1,3 +1,4 @@
+import { toast } from "./lib/toast";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { api } from "./lib/api";
 import type { Me, OrgRole } from "./types";
@@ -28,6 +29,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function logout() {
     await api.logout();
     setMe(null);
+    toast.info("You've been signed out.");
   }
 
   useEffect(() => {

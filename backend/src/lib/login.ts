@@ -5,12 +5,7 @@ import { prisma } from "../prisma.js";
 import { env } from "../env.js";
 import { signSession } from "./jwt.js";
 import { hashPassword, verifyPassword, passwordContainsIdentityError, PasswordPolicyError } from "./password.js";
-import { assertPasswordNotReused, recordPasswordHistory } from "./passwordHistory.js";
-
-// When the frontend and API are served from different origins (e.g. two
-// Render services), the browser only sends the session cookie on cross-site
-// XHR if it's SameSite=None; Secure. In local dev (same-site, http) we keep
-// Lax so the cookie still works without HTTPS.
+import { changePasswordWithHistory } from "./credentialHistory.js";
 const cookieOptions = {
   httpOnly: true as const,
   sameSite: (env.isProd ? "none" : "lax") as "none" | "lax",
@@ -27,37 +22,26 @@ export function setSessionCookie(res: Response, userId: string) {
 export function clearSessionCookie(res: Response) {
   res.clearCookie(env.sessionCookieName, cookieOptions);
 }
-
-/** Wrong email/password or unknown user. Kept vague on purpose so login
- *  responses don't reveal which emails exist. */
 export class InvalidCredentialsError extends Error {
   constructor() {
     super("Invalid email or password.");
   }
 }
-
-/** Registration attempted for an email that already has an account. */
 export class AccountExistsError extends Error {
   constructor() {
     super("An account with this email already exists. Please sign in instead.");
   }
 }
-
-/** The invite token in a signup link is unknown, already used, or expired. */
 export class InvalidInviteError extends Error {
   constructor() {
     super("This invite link is invalid or has expired. Ask your administrator for a new one.");
   }
 }
-
-/** The logged-in account's email doesn't match the invite's email. */
 export class InviteEmailMismatchError extends Error {
   constructor(inviteEmail: string) {
     super(`This invite is for ${inviteEmail}. Log out and use that account.`);
   }
 }
-
-/** Email/password login. Throws InvalidCredentialsError for any failure mode. */
 export async function loginWithPassword(input: {
   email: string;
   password: string;
@@ -70,17 +54,11 @@ export async function loginWithPassword(input: {
   return user;
 }
 
-// ---------------------------------------------------------------------------
-// Invites
-// ---------------------------------------------------------------------------
-
 async function loadUsableInvite(token: string): Promise<Invite | null> {
   const invite = await prisma.invite.findUnique({ where: { token } });
   if (!invite || invite.status !== "PENDING" || invite.expiresAt < new Date()) return null;
   return invite;
 }
-
-/** Public info about a signup invite link, or null if unusable. */
 export async function getInviteByToken(token: string) {
   const invite = await loadUsableInvite(token);
   if (!invite) return null;
@@ -103,12 +81,6 @@ export async function getInviteByToken(token: string) {
     accountExists: Boolean(existing),
   };
 }
-
-/**
- * Turn an invite into an org membership (+ project attachments for clients)
- * and mark it accepted. projectIds are re-validated against the invite's org
- * so a stale/corrupt invite can never attach a client across org boundaries.
- */
 async function consumeInvite(tx: Prisma.TransactionClient, invite: Invite, userId: string) {
   const membership = await tx.orgMembership.upsert({
     where: { userId_orgId: { userId, orgId: invite.orgId } },
@@ -128,9 +100,6 @@ async function consumeInvite(tx: Prisma.TransactionClient, invite: Invite, userI
       });
     }
   }
-  // Developers may optionally be pre-attached to projects at invite time too
-  // (unlike clients, this is optional — a developer can still gain access to
-  // other projects later purely via ticket assignment; see lib/projectAccess.ts).
   if (invite.role === "DEVELOPER" && invite.projectIds.length) {
     const projects = await tx.project.findMany({
       where: { id: { in: invite.projectIds }, orgId: invite.orgId },
@@ -146,12 +115,6 @@ async function consumeInvite(tx: Prisma.TransactionClient, invite: Invite, userI
   }
   await tx.invite.update({ where: { id: invite.id }, data: { status: "ACCEPTED" } });
 }
-
-/**
- * Invite-link registration for a NEW account. The email comes from the invite
- * token, never from user input. Existing emails must go through
- * acceptInviteForUser (sign in first) instead.
- */
 export async function registerFromInvite(input: {
   token: string;
   name: string;
@@ -185,22 +148,11 @@ export async function acceptInviteForUser(user: User, token: string): Promise<vo
   await prisma.$transaction((tx) => consumeInvite(tx, invite, user.id));
 }
 
-// ---------------------------------------------------------------------------
-// Password reset
-// ---------------------------------------------------------------------------
-
-const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
-
-/**
- * Create a password-reset token for `email` if an account exists, and return
- * the raw token (to embed in the emailed link). Returns null when no account
- * exists — callers should respond identically either way so the endpoint
- * never reveals which emails are registered.
- */
 export async function createPasswordResetToken(
   email: string,
 ): Promise<{ token: string; user: User } | null> {
@@ -217,11 +169,6 @@ export async function createPasswordResetToken(
   });
   return { token, user };
 }
-
-/**
- * Consume a reset token and set a new password. Throws on an invalid, expired,
- * or already-used token. Invalidates all of the user's other reset tokens.
- */
 export async function resetPasswordWithToken(token: string, newPassword: string): Promise<User> {
   const record = await prisma.passwordResetToken.findUnique({
     where: { tokenHash: hashToken(token) },
@@ -234,18 +181,19 @@ export async function resetPasswordWithToken(token: string, newPassword: string)
 
   const identityErr = passwordContainsIdentityError(newPassword, existingUser.email, existingUser.name);
   if (identityErr) throw new PasswordPolicyError(identityErr);
-  await assertPasswordNotReused(existingUser.id, existingUser.passwordHash, newPassword);
-
-  const passwordHash = await hashPassword(newPassword);
-  const [user] = await prisma.$transaction([
-    prisma.user.update({ where: { id: record.userId }, data: { passwordHash } }),
-    prisma.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
-    // Burn any other outstanding tokens for this user.
-    prisma.passwordResetToken.updateMany({
-      where: { userId: record.userId, usedAt: null, id: { not: record.id } },
-      data: { usedAt: new Date() },
-    }),
-  ]);
-  await recordPasswordHistory(existingUser.id, existingUser.passwordHash);
-  return user;
+  return changePasswordWithHistory(existingUser.id, newPassword, {
+    verify: async (tx) => {
+      const fresh = await tx.passwordResetToken.findUnique({ where: { id: record.id } });
+      if (!fresh || fresh.usedAt || fresh.expiresAt < new Date()) {
+        throw new Error("This reset link is invalid or has expired.");
+      }
+    },
+    after: async (tx) => {
+      await tx.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } });
+      await tx.passwordResetToken.updateMany({
+        where: { userId: record.userId, usedAt: null, id: { not: record.id } },
+        data: { usedAt: new Date() },
+      });
+    },
+  });
 }

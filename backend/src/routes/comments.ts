@@ -47,6 +47,7 @@ function serialize(
     canDelete: !archived && (c.authorId === user.id || admin),
   };
 }
+
 commentsRouter.get("/", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
@@ -62,7 +63,7 @@ commentsRouter.get("/", requireAuth, async (req, res) => {
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
   const admin = isAdminOrAbove(user, orgId);
-  res.json(comments.map((c) => serialize(c, user, admin, Boolean(ticket.archivedAt))));
+  res.json(comments.map((c) => serialize(c, user, admin, Boolean(ticket.archivedAt || ticket.project.archivedAt))));
 });
 
 const bodySchema = z
@@ -95,6 +96,7 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
   const user = req.user!;
   const orgId = ticket.project.orgId;
   const internal = isInternal(user, orgId);
+
   let visibility: "INTERNAL" | "CLIENT_VISIBLE" = internal
     ? parsed.data.visibility ?? "INTERNAL"
     : "CLIENT_VISIBLE";

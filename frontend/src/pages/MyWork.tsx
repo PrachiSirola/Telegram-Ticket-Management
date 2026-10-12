@@ -14,53 +14,47 @@ import {
   IconAlertTriangle,
   IconClock,
 } from "../components/Icons";
-import type { CompletedTicket, Ticket, WorkRange, WorkStatusFilter } from "../types";
+import { DateRangeFilter, type DateRangeValue } from "../components/DateRangeFilter";
+import type { CompletedTicket, Ticket, TicketPriority, WorkStatusFilter } from "../types";
 
 const PAGE_SIZE = 15;
 
-const RANGE_OPTIONS: { value: WorkRange; label: string }[] = [
-  { value: "current", label: "Current Work" },
-  { value: "today", label: "Today" },
-  { value: "week", label: "This Week" },
-  { value: "prev_week", label: "Previous Week" },
-  { value: "month", label: "This Month" },
-  { value: "prev_month", label: "Previous Month" },
-  { value: "custom", label: "Custom Range" },
-];
+const SECTION_TITLES: Record<WorkStatusFilter, string> = {
+  all: "My Work",
+  pending: "Pending",
+  in_progress: "In Progress",
+  completed: "Completed",
+  overdue: "Overdue",
+};
 
-const STATUS_TABS: { value: WorkStatusFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "pending", label: "Pending" },
-  { value: "in_progress", label: "In Progress" },
-  { value: "completed", label: "Completed" },
-  { value: "overdue", label: "Overdue" },
+const PRIORITY_OPTIONS = [
+  { value: "", label: "All priorities" },
+  ...(["LOW", "MEDIUM", "HIGH", "URGENT"] as const).map((p) => ({ value: p, label: p })),
 ];
 
 export default function MyWork() {
-  const { activeOrgId } = useOrg();
+  const { activeOrgId, activeOrg } = useOrg();
+  const timeZone = activeOrg?.timezone;
 
-  const [range, setRange] = useState<WorkRange>("current");
-  const [customFrom, setCustomFrom] = useState("");
-  const [customTo, setCustomTo] = useState("");
+  const [dates, setDates] = useState<DateRangeValue>({ range: "all", from: "", to: "" });
+  const { range, from: customFrom, to: customTo } = dates;
   const [status, setStatus] = useState<WorkStatusFilter>("all");
+  const [priority, setPriority] = useState<TicketPriority | "">("");
   const [projectId, setProjectId] = useState("");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [completedPage, setCompletedPage] = useState(1);
 
-  // Debounce the search box so we're not firing a request per keystroke.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
     return () => clearTimeout(t);
   }, [search]);
 
-  // Any filter change invalidates both tables' current page — land back on
-  // page 1 of each rather than showing a stale/out-of-range page.
   useEffect(() => {
     setPage(1);
     setCompletedPage(1);
-  }, [range, customFrom, customTo, status, projectId, debouncedSearch]);
+  }, [range, customFrom, customTo, status, priority, projectId, debouncedSearch]);
 
   const { data: projects } = useQuery({
     queryKey: ["projects", activeOrgId],
@@ -76,6 +70,7 @@ export default function MyWork() {
       customFrom,
       customTo,
       status,
+      priority,
       projectId,
       debouncedSearch,
       page,
@@ -86,6 +81,7 @@ export default function MyWork() {
         range,
         ...(range === "custom" ? { from: customFrom || undefined, to: customTo || undefined } : {}),
         status,
+        priority: priority || undefined,
         projectId: projectId || undefined,
         q: debouncedSearch || undefined,
         page,
@@ -112,102 +108,54 @@ export default function MyWork() {
         </p>
       </div>
 
-      {/* Range tabs */}
-      <div className="flex flex-wrap gap-2">
-        {RANGE_OPTIONS.map((r) => (
-          <button
-            key={r.value}
-            onClick={() => setRange(r.value)}
-            className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
-              range === r.value
-                ? "bg-primary text-white"
-                : "border border-card-border bg-white text-fg-soft hover:bg-accent hover:text-fg"
-            }`}
-          >
-            {r.label}
-          </button>
-        ))}
+      {/* Summary cards — click one to filter the table below by it (click again to clear) */}
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4" role="group" aria-label="Filter tickets by summary">
+        <SummaryCard testId="card-assigned" label="Assigned" value={summary?.assigned} icon={<IconFolder size={18} />} color="#92613a" bg="#f3ebe0" selected={status === "all"} onClick={() => setStatus("all")} />
+        <SummaryCard testId="card-in-progress" label="In Progress" value={summary?.inProgress} icon={<IconClock size={18} />} color="#b8860b" bg="#fdf6e3" selected={status === "in_progress"} onClick={() => setStatus(status === "in_progress" ? "all" : "in_progress")} />
+        <SummaryCard testId="card-completed" label="Completed" value={summary?.completed} icon={<IconCheckCircle size={18} />} color="#5a8a3c" bg="#f0f6ec" selected={status === "completed"} onClick={() => setStatus(status === "completed" ? "all" : "completed")} />
+        <SummaryCard testId="card-overdue" label="Overdue" value={summary?.overdue} icon={<IconAlertTriangle size={18} />} color="#b93a2a" bg="#fdf0ee" selected={status === "overdue"} onClick={() => setStatus(status === "overdue" ? "all" : "overdue")} />
       </div>
 
-      {/* Custom range inputs */}
-      {range === "custom" && (
-        <div className="card flex flex-wrap items-end gap-3 p-4">
-          <div>
-            <div className="eyebrow mb-1.5">From</div>
-            <input
-              type="date"
-              className="input"
-              value={customFrom}
-              onChange={(e) => setCustomFrom(e.target.value)}
-            />
-          </div>
-          <div>
-            <div className="eyebrow mb-1.5">To</div>
-            <input
-              type="date"
-              className="input"
-              value={customTo}
-              onChange={(e) => setCustomTo(e.target.value)}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <SummaryCard label="Assigned" value={summary?.assigned} icon={<IconFolder size={18} />} color="#92613a" bg="#f3ebe0" />
-        <SummaryCard label="In Progress" value={summary?.inProgress} icon={<IconClock size={18} />} color="#b8860b" bg="#fdf6e3" />
-        <SummaryCard label="Completed" value={summary?.completed} icon={<IconCheckCircle size={18} />} color="#5a8a3c" bg="#f0f6ec" />
-        <SummaryCard label="Overdue" value={summary?.overdue} icon={<IconAlertTriangle size={18} />} color="#b93a2a" bg="#fdf0ee" />
-      </div>
-
-      {/* Status tabs + project filter + search */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex flex-wrap overflow-hidden rounded-xl border border-card-border bg-white text-sm shadow-sm">
-          {STATUS_TABS.map((s) => (
-            <button
-              key={s.value}
-              onClick={() => setStatus(s.value)}
-              className={`px-4 py-2 font-semibold transition-all ${
-                status === s.value ? "bg-primary text-white" : "text-fg-soft hover:bg-accent hover:text-fg"
-              }`}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex flex-1 flex-wrap items-center justify-end gap-2" style={{ minWidth: 260 }}>
-          <Dropdown
-            className="w-48"
-            size="sm"
-            placeholder="All projects"
-            searchable
-            searchPlaceholder="Search projects…"
-            value={projectId}
-            onChange={setProjectId}
-            options={[
-              { value: "", label: "All projects" },
-              ...(projects ?? []).map((p) => ({ value: p.id, label: p.name })),
-            ]}
+      {/* Filters: date range (same presets as Attendance) + priority + project + search */}
+      <div className="flex flex-wrap items-center gap-2" data-testid="work-filters">
+        <DateRangeFilter value={dates} onChange={setDates} timeZone={timeZone} />
+        <Dropdown
+          className="w-40"
+          size="sm"
+          placeholder="All priorities"
+          value={priority}
+          onChange={(v) => setPriority(v as TicketPriority | "")}
+          options={PRIORITY_OPTIONS}
+        />
+        <Dropdown
+          className="w-48"
+          size="sm"
+          placeholder="All projects"
+          searchable
+          searchPlaceholder="Search projects…"
+          value={projectId}
+          onChange={setProjectId}
+          options={[
+            { value: "", label: "All projects" },
+            ...(projects ?? []).map((p) => ({ value: p.id, label: p.name })),
+          ]}
+        />
+        <div className="relative min-w-[200px] flex-1 sm:max-w-[260px] sm:flex-none">
+          <IconSearch size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+          <input
+            className="input"
+            style={{ paddingLeft: 34, width: "100%" }}
+            placeholder="Search tickets…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
           />
-          <div className="relative">
-            <IconSearch size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-            <input
-              className="input"
-              style={{ paddingLeft: 34, width: 220 }}
-              placeholder="Search tickets…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
         </div>
       </div>
 
       {/* My Work table */}
       <section>
         <h2 className="mb-3 text-lg font-bold tracking-tight text-fg" style={{ fontFamily: "var(--font-display)" }}>
-          My Work
+          {SECTION_TITLES[status]}
         </h2>
         <div className="card overflow-hidden">
           <WorkTable tickets={work?.items} loading={isLoading} />
@@ -223,7 +171,7 @@ export default function MyWork() {
           Completed Work
         </h2>
         <div className="card overflow-hidden">
-          <CompletedTable tickets={completedWork?.items} loading={isLoading} />
+          <CompletedTable tickets={completedWork?.items} loading={isLoading} timeZone={timeZone} />
         </div>
         {completedWork && completedWork.total > 0 && (
           <Pagination
@@ -244,19 +192,34 @@ function SummaryCard({
   icon,
   color,
   bg,
+  selected,
+  onClick,
+  testId,
 }: {
   label: string;
   value?: number;
   icon: React.ReactNode;
   color: string;
   bg: string;
+  selected: boolean;
+  onClick: () => void;
+  testId: string;
 }) {
   return (
-    <div className="card p-4">
+    <button
+      type="button"
+      data-testid={testId}
+      aria-pressed={selected}
+      onClick={onClick}
+      className={`card p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${
+        selected ? "ring-2 ring-primary" : ""
+      }`}
+      style={selected ? { background: bg } : undefined}
+    >
       <div className="flex items-center gap-3">
         <div
           className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl"
-          style={{ background: bg, color }}
+          style={{ background: selected ? "#fff" : bg, color }}
         >
           {icon}
         </div>
@@ -267,7 +230,7 @@ function SummaryCard({
           <div className="text-xs font-medium text-muted">{label}</div>
         </div>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -318,7 +281,7 @@ function WorkTable({ tickets, loading }: { tickets?: Ticket[]; loading: boolean 
               <PriorityBadge priority={t.priority} />
             </span>
             <span className="text-sm text-fg-soft">
-              {t.dueDate ? new Date(t.dueDate).toLocaleDateString() : "—"}
+              {t.dueDate ? new Date(t.dueDate).toLocaleDateString(undefined, { timeZone: "UTC" }) : "—"}
             </span>
             <span>
               <StatusBadge status={t.status} />
@@ -332,7 +295,7 @@ function WorkTable({ tickets, loading }: { tickets?: Ticket[]; loading: boolean 
 
 const COMPLETED_GRID = "sm:grid-cols-[2fr_1fr_140px]";
 
-function CompletedTable({ tickets, loading }: { tickets?: CompletedTicket[]; loading: boolean }) {
+function CompletedTable({ tickets, loading, timeZone }: { tickets?: CompletedTicket[]; loading: boolean; timeZone?: string }) {
   if (loading) {
     return (
       <div className="space-y-3 p-5">
@@ -372,7 +335,7 @@ function CompletedTable({ tickets, loading }: { tickets?: CompletedTicket[]; loa
             <span className="truncate text-sm text-fg-soft">{t.project?.name ?? "—"}</span>
             <span className="flex items-center gap-1.5 text-sm font-medium text-ok">
               <IconCheckCircle size={14} />
-              {new Date(t.completedAt).toLocaleDateString()}
+              {new Date(t.completedAt).toLocaleDateString(undefined, { timeZone })}
             </span>
           </Link>
         ))}

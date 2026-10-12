@@ -1,16 +1,3 @@
-/**
- * One-off CLI to designate (or reinstate) the single fixed platform Super
- * Admin — the only account allowed to create new organisations. Run this
- * once for your own existing account (created back when public signup was
- * still open); there's no UI for this on purpose — it's meant to be a rare,
- * manual, out-of-band action.
- *
- * Usage (from backend/):
- *   npx tsx src/scripts/set-platform-admin.ts you@gmail.com
- *
- * Pass a second argument "off" to deactivate instead:
- *   npx tsx src/scripts/set-platform-admin.ts you@gmail.com off
- */
 import "dotenv/config";
 import { prisma } from "../prisma.js";
 

@@ -1,3 +1,4 @@
+import { apiError, toast } from "../lib/toast";
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -136,6 +137,8 @@ export function Comments({
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
 function CommentCard({
   comment,
   ticketId,
@@ -164,7 +167,9 @@ function CommentCard({
 
   const del = useMutation({
     mutationFn: () => api.deleteComment(ticketId, comment.id),
+    meta: { errorTitle: "Couldn't delete the comment" },
     onSuccess: () => {
+      toast.success(internal ? "Internal note deleted." : "Comment deleted.");
       setConfirming(false);
       onChanged();
     },
@@ -323,7 +328,11 @@ function EditBox({
     .map((m) => ({ id: m.userId, name: m.name }));
   const save = useMutation({
     mutationFn: () => api.editComment(ticketId, comment.id, body),
-    onSuccess: onSaved,
+    meta: { errorTitle: "Couldn't save the comment" },
+    onSuccess: () => {
+      toast.success("Comment updated.");
+      onSaved();
+    },
   });
   const err = (save.error as any)?.response?.data?.error as string | undefined;
   const unchanged = body.trim() === comment.body.trim();
@@ -356,6 +365,8 @@ function EditBox({
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
 function Composer({
   ticketId,
   members,
@@ -373,6 +384,7 @@ function Composer({
   onCancel?: () => void;
   onPosted: () => void;
 }) {
+  // A reply into an internal thread is always internal (the API enforces it too).
   const locked = parent && rootVisibility === "INTERNAL";
   const [body, setBody] = useState("");
   const [visibility, setVisibility] = useState<CommentVisibility>(
@@ -381,8 +393,8 @@ function Composer({
   const [picked, setPicked] = useState<MentionMember[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [percent, setPercent] = useState(0);
-  const [postedId, setPostedId] = useState<string | null>(null); 
-  const postedRef = useRef<string | null>(null); 
+  const [postedId, setPostedId] = useState<string | null>(null); // comment exists; only uploads are being retried
+  const postedRef = useRef<string | null>(null); // same, readable inside the mutation callbacks
   const [dragging, setDragging] = useState(false);
   const staged = useStagedFiles();
   const picker = useRef<HTMLInputElement>(null);
@@ -392,6 +404,9 @@ function Composer({
     .map((m) => ({ id: m.userId, name: m.name }));
 
   const post = useMutation({
+    // Reports its own outcome (a comment can post while its files fail), so the
+    // global error toast is skipped.
+    meta: { silent: true },
     mutationFn: async () => {
       let id = postedRef.current;
       if (!id) {
@@ -415,6 +430,9 @@ function Composer({
       }
     },
     onSuccess: () => {
+      const n = staged.files.length;
+      const what = parent ? "Reply" : visibility === "INTERNAL" ? "Internal note" : "Comment";
+      toast.success(`${what} posted${n ? ` with ${n} ${n === 1 ? "attachment" : "attachments"}` : ""}.`);
       setBody("");
       setPicked([]);
       setError(null);
@@ -426,14 +444,17 @@ function Composer({
     onError: (e: any) => {
       if (postedRef.current) {
         const m = uploadErrorMessage(e);
-        setError(
+        const detail =
           `Your comment was posted, but its attachments couldn't be uploaded: ${m.message}` +
-            (m.files ? " " + m.files.map((f) => `${f.name} ${f.reason}`).join("; ") : ""),
-        );
-        onPosted();
+          (m.files ? " " + m.files.map((f) => `${f.name} ${f.reason}`).join("; ") : "");
+        setError(detail);
+        toast.warning(detail, { title: "Comment posted, attachments failed", duration: 9000 });
+        onPosted(); // show the comment that exists
       } else {
         const d = e?.response?.data;
-        setError(typeof d?.error === "string" ? d.error : "Failed to post comment.");
+        const msg = typeof d?.error === "string" ? d.error : "Failed to post comment.";
+        setError(msg);
+        toast.error(apiError(e, msg), { title: "Couldn't post the comment" });
       }
     },
   });

@@ -1,3 +1,6 @@
+import { q, toast } from "../lib/toast";
+import { BackLink } from "../components/BackLink";
+import { RestoreProjectModal } from "../components/ProjectModals";
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -21,26 +24,34 @@ import {
 } from "../components/MentionTextarea";
 import { matchWords } from "../lib/search";
 import type { Member, TeamMember, TicketPriority, TicketType } from "../types";
-import { todayStr } from "../lib/dateUtils";
+import { todayInTimeZone, todayStr } from "../lib/dateUtils";
 
 const STATUS_OPTS = ["OPEN", "IN_PROGRESS", "DONE"];
 const PRIORITY_OPTS = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 const TYPE_OPTS = ["BUG", "FEATURE", "TASK"];
+// "" (default) = active tickets only; the team can also look at archived ones.
 const ARCHIVED_OPTS = ["archived", "all"];
 const opt = (v: string) => ({ value: v, label: v.replace("_", " ") });
 
 export default function Project() {
   const { projectId = "" } = useParams();
   const { me } = useAuth();
-  const { activeOrgId } = useOrg();
+  const { activeOrgId, activeOrg } = useOrg();
   const qc = useQueryClient();
-  const { filters, page, pageSize, setFilter, setPage, setPageSize, clearFilters } = useListParams({
+  // Filters + page + page size live in the URL (?status=OPEN&page=2&pageSize=50),
+  // so they survive refresh / back / shared links. Changing a filter or the
+  // page size resets to page 1 (page size itself is kept).
+  const { filters, page, pageSize, setFilter, setFilters, setPage, setPageSize, clearFilters } = useListParams({
     filters: { status: STATUS_OPTS, priority: PRIORITY_OPTS, type: TYPE_OPTS, archived: ARCHIVED_OPTS },
+    dateKeys: ["dueDate"],
   });
   const listTop = useRef<HTMLDivElement>(null);
+  // The project whose default view has been settled (see the effect below).
+  const [defaultsFor, setDefaultsFor] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [showAddMember, setShowAddMember] = useState(false);
   const [removingMember, setRemovingMember] = useState<Member | null>(null);
+  // Set when a ticket was created but its attachments couldn't be uploaded.
   const [uploadNotice, setUploadNotice] = useState<{
     ticketId: string;
     title: string;
@@ -49,12 +60,15 @@ export default function Project() {
   } | null>(null);
   const canManage = isAdminOrAboveIn(me, activeOrgId);
 
-  const { data: projects } = useQuery({
-    queryKey: ["projects", activeOrgId],
-    queryFn: () => api.projects(activeOrgId),
-    enabled: !!activeOrgId,
+  // Fetched by id (not picked from the project list) because the list hides
+  // archived projects, which can still be opened read-only.
+  const { data: project } = useQuery({
+    queryKey: ["projects", activeOrgId, "one", projectId],
+    queryFn: () => api.project(activeOrgId, projectId),
+    enabled: !!activeOrgId && !!projectId,
   });
-  const project = projects?.find((p) => p.id === projectId);
+  const projectArchived = !!project?.archivedAt;
+  const [restoring, setRestoring] = useState(false);
 
   const activeFilters = Object.fromEntries(Object.entries(filters).filter(([, v]) => v));
   const {
@@ -67,11 +81,32 @@ export default function Project() {
   } = useQuery({
     queryKey: ["tickets", activeOrgId, projectId, activeFilters, page, pageSize],
     queryFn: () => api.ticketsPaged(activeOrgId, projectId, { ...activeFilters, page, pageSize }),
-    enabled: !!activeOrgId && !!projectId,
+    // Wait until the default view (today + Open) has been settled, so the
+    // unfiltered list never flashes before it.
+    enabled: !!activeOrgId && !!projectId && defaultsFor === projectId,
+    // Keep the current rows on screen (dimmed) while the next page loads, but
+    // never carry them over from a different project.
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === projectId ? prev : undefined),
   });
   const tickets = paged?.items;
   const hasFilters = Object.keys(activeFilters).length > 0;
+
+  // Default view: opening a project (with no filters in the URL) shows the
+  // Open tickets due TODAY, where "today" is the date in the organisation's
+  // timezone. It only applies on arrival — clearing the date or any other filter
+  // afterwards is respected, and a link that already carries filters/page is left alone.
+  useEffect(() => {
+    if (!projectId || !activeOrg || defaultsFor === projectId) return;
+    if (!hasFilters && page === 1) {
+      setFilters({ status: "OPEN", dueDate: todayInTimeZone(activeOrg.timezone) });
+    }
+    setDefaultsFor(projectId);
+  }, [projectId, activeOrg, defaultsFor, hasFilters, page, setFilters]);
+
+  // The server clamps an out-of-range page (e.g. tickets were deleted, or a
+  // hand-edited URL) to the last real page — mirror that into the URL.
+  // Skip while `paged` is only placeholder data from the previous page —
+  // that would look like a clamp and bounce the user straight back.
   useEffect(() => {
     if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
   }, [paged, isPlaceholderData, page, setPage]);
@@ -85,6 +120,14 @@ export default function Project() {
     queryFn: () => api.projectMembers(activeOrgId, projectId),
     enabled: !!activeOrgId && !!projectId,
   });
+
+  // Removes a DEVELOPER/CLIENT from this project by re-PUTing the explicit
+  // attachment list with them left out — the same set/prune endpoints the
+  // Add Member flow uses, just with one membershipId excluded instead of
+  // added. Note: a developer who still has a ticket assigned in this
+  // project keeps implicit access (see lib/projectAccess.ts) and will
+  // still appear here even after this succeeds — reassign or close their
+  // ticket first if they need to fully lose access.
   const removeMember = useMutation({
     mutationFn: async (target: Member) => {
       const all = members ?? [];
@@ -100,7 +143,9 @@ export default function Project() {
         await api.setProjectClients(activeOrgId, projectId, remaining);
       }
     },
-    onSuccess: () => {
+    meta: { errorTitle: "Couldn't remove the member" },
+    onSuccess: (_d, target) => {
+      toast.success(`${target.name} was removed from ${project?.name ? q(project.name) : "the project"}.`);
       setRemovingMember(null);
       qc.invalidateQueries({ queryKey: ["projectMembers", activeOrgId, projectId] });
     },
@@ -109,6 +154,7 @@ export default function Project() {
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
       <div>
+        <BackLink />
         <div className="mb-5 flex items-center justify-between">
           <div>
             <div className="eyebrow mb-1">Project</div>
@@ -117,16 +163,46 @@ export default function Project() {
               <p className="mt-1 text-sm text-fg-soft">{project.description}</p>
             )}
           </div>
-          <button onClick={() => setShowForm((s) => !s)} className="btn btn-primary btn-sm">
+          <button
+            onClick={() => setShowForm((s) => !s)}
+            className="btn btn-primary btn-sm"
+            disabled={projectArchived}
+            title={projectArchived ? "This project is archived" : undefined}
+          >
             <IconPlus size={15} />
             {showForm ? "Cancel" : "New Ticket"}
           </button>
         </div>
 
-        {showForm && (
+        {projectArchived && (
+          <div className="alert mb-4 flex flex-wrap items-center justify-between gap-2 text-sm" role="status" data-testid="project-archived-banner">
+            <div>
+              <span className="font-semibold text-fg">This project is archived.</span>{" "}
+              <span className="text-fg-soft">It's hidden from project lists and its tickets are read-only.</span>
+            </div>
+            {canManage && (
+              <button className="btn btn-secondary btn-sm" onClick={() => setRestoring(true)} data-testid="project-restore">
+                Restore project
+              </button>
+            )}
+          </div>
+        )}
+        <RestoreProjectModal
+          orgId={activeOrgId}
+          project={restoring ? project ?? null : null}
+          onClose={() => setRestoring(false)}
+          onDone={() => {
+            setRestoring(false);
+            qc.invalidateQueries({ queryKey: ["projects"] });
+            qc.invalidateQueries({ queryKey: ["tickets", activeOrgId, projectId] });
+          }}
+        />
+
+        {showForm && !projectArchived && (
           <NewTicketForm
             orgId={activeOrgId}
             projectId={projectId}
+            projectName={project?.name}
             canAssign={canManage}
             members={members ?? []}
             internal={isInternalIn(me, activeOrgId)}
@@ -134,6 +210,7 @@ export default function Project() {
               setShowForm(false);
               setUploadNotice(failed ?? null);
               qc.invalidateQueries({ queryKey: ["tickets", activeOrgId, projectId] });
+              // A new ticket changes the project's open count (Dashboard order).
               qc.invalidateQueries({ queryKey: ["projects"] });
             }}
           />
@@ -184,6 +261,26 @@ export default function Project() {
               options={[{ value: "", label: `All ${key}` }, ...opts.map(opt)]}
             />
           ))}
+          <div className="flex items-center gap-1.5">
+            <input
+              type="date"
+              className="input"
+              style={{ width: 150, minHeight: 36, padding: "0 12px", fontSize: 13 }}
+              aria-label="Due date"
+              title="Show tickets due on this date"
+              value={filters.dueDate ?? ""}
+              onChange={(e) => setFilter("dueDate", e.target.value)}
+            />
+            {filters.dueDate && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setFilter("dueDate", "")}
+              >
+                Clear date
+              </button>
+            )}
+          </div>
           {isInternalIn(me, activeOrgId) && (
             <Dropdown
               className="w-44"
@@ -325,6 +422,7 @@ export default function Project() {
         <AddMemberModal
           orgId={activeOrgId}
           projectId={projectId}
+          projectName={project?.name}
           currentMembers={members ?? []}
           onClose={() => setShowAddMember(false)}
           onAdded={() => {
@@ -352,15 +450,25 @@ export default function Project() {
   );
 }
 
+/**
+ * Lets SA/Admin attach an existing org DEVELOPER or CLIENT to this project —
+ * the gap this fills: today, project attachment only happens at invite
+ * time (see Members.tsx's InviteForm), so someone already in the org had no
+ * way to be added to a project after the fact. Reuses the same
+ * setProjectDevelopers/setProjectClients endpoints the invite flow relies
+ * on, just called after the fact instead of during signup.
+ */
 function AddMemberModal({
   orgId,
   projectId,
   currentMembers,
   onClose,
   onAdded,
+  projectName,
 }: {
   orgId: string;
   projectId: string;
+  projectName?: string;
   currentMembers: Member[];
   onClose: () => void;
   onAdded: () => void;
@@ -373,6 +481,10 @@ function AddMemberModal({
     queryFn: () => api.orgMembers(orgId),
     enabled: !!orgId,
   });
+
+  // Only devs/clients can be added this way — SA/Admin already see every
+  // project, and a disabled member can't be attached to new work. Anyone
+  // already on this project (by userId) is excluded from the picker.
   const currentUserIds = new Set(currentMembers.map((m) => m.userId));
   const candidates = (orgMembers ?? []).filter(
     (m) => !m.disabled && (m.role === "DEVELOPER" || m.role === "CLIENT") && !currentUserIds.has(m.userId),
@@ -398,7 +510,13 @@ function AddMemberModal({
           : Promise.resolve(),
       ]);
     },
-    onSuccess: onAdded,
+    meta: { errorTitle: "Couldn't add to the project" },
+    onSuccess: () => {
+      const names = candidates.filter((m) => selected.includes(m.membershipId)).map((m) => m.name);
+      const list = names.length > 2 ? `${names[0]}, ${names[1]} and ${names.length - 2} more` : names.join(" and ");
+      toast.success(`${list} ${names.length === 1 ? "was" : "were"} added to ${projectName ? q(projectName) : "the project"}.`);
+      onAdded();
+    },
   });
 
   function toggle(membershipId: string) {
@@ -426,6 +544,11 @@ function AddMemberModal({
               onChange={(e) => setQuery(e.target.value)}
             />
           )}
+          {/* Inline checklist, not a floating dropdown — a floating menu
+              would overlay the Cancel/Add buttons below it and, being
+              multi-select, never auto-closes after a pick. This scrolls
+              within its own fixed height instead, so the buttons always
+              stay visible and in normal document flow. */}
           <div className="max-h-56 overflow-y-auto rounded-xl border border-line">
             {visibleCandidates.length === 0 ? (
               <div className="px-3 py-3 text-sm text-muted">No matches</div>
@@ -489,9 +612,11 @@ function NewTicketForm({
   members,
   internal,
   onCreated,
+  projectName,
 }: {
   orgId: string;
   projectId: string;
+  projectName?: string;
   canAssign: boolean;
   members: Member[];
   internal: boolean;
@@ -509,6 +634,9 @@ function NewTicketForm({
   const [dueDate, setDueDate] = useState("");
   const [assigneeId, setAssigneeId] = useState("");
   const [picked, setPicked] = useState<MentionMember[]>([]);
+  // Attachments are optional. They're staged here and uploaded right after the
+  // ticket exists, through the same endpoint (and so the same validation,
+  // visibility and permission rules) as the Attachments panel on the ticket.
   const staged = useStagedFiles();
   const [vis, setVis] = useState<VisibilityValue>({
     visibility: internal ? "INTERNAL" : "CLIENT_VISIBLE",
@@ -530,6 +658,8 @@ function NewTicketForm({
         mentions: extractMentionIds(description, picked),
       });
       if (staged.files.length === 0) return { ticket, failed: undefined };
+      // The ticket is already saved. If the upload fails we keep the ticket
+      // and report it, rather than losing what the person typed.
       try {
         setPhase("files");
         setPercent(0);
@@ -544,7 +674,16 @@ function NewTicketForm({
         return { ticket, failed: { ticketId: ticket.id, title: ticket.title, message, files } };
       }
     },
-    onSuccess: ({ failed }) => onCreated(failed),
+    meta: { errorTitle: "Couldn't create the ticket" },
+    onSuccess: ({ ticket, failed }) => {
+      const who = assigneeId ? members.find((m) => m.userId === assigneeId)?.name : null;
+      toast.success(
+        `Ticket ${q(ticket.title)} was created${projectName ? ` in ${q(projectName)}` : ""}${who ? ` and assigned to ${who}` : ""}.`,
+      );
+      if (failed)
+        toast.warning(failed.message, { title: `Attachments for ${q(failed.title)} weren't uploaded`, duration: 9000 });
+      onCreated(failed);
+    },
   });
   const needsPeople = internal && vis.visibility === "SELECTED" && vis.selectedUserIds.length === 0;
   const { me } = useAuth();

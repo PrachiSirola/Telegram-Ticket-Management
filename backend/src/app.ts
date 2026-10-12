@@ -16,14 +16,8 @@ import { ticketActionsRouter } from "./routes/ticketActions.js";
 
 export function createApp() {
   const app = express();
-<<<<<<< Updated upstream
-  if (env.isProd) app.set("trust proxy", 1);
-=======
 
-  // Trust the first proxy hop (Render/nginx/Cloudflare) so Express sees the
-  // real client IP in X-Forwarded-For and req.secure reflects HTTPS.
-  app.set("trust proxy", 1);
->>>>>>> Stashed changes
+  if (env.isProd) app.set("trust proxy", 1);
 
   app.use(
     cors({
@@ -58,6 +52,8 @@ export function createApp() {
   );
   app.use(express.json());
   app.use(cookieParser());
+
+  // Attach req.user (if logged in) to every request.
   app.use(loadUser);
 
   app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -75,6 +71,8 @@ export function createApp() {
   app.use("/tickets/:id/attachments", attachmentsRouter);
   app.use("/tickets/:id", ticketActionsRouter);
   app.use("/attachments", attachmentFileRouter);
+
+  // Central error handler.
   app.use(
     (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       console.error("[error]", err);

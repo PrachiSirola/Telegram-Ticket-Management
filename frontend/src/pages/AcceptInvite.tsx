@@ -1,3 +1,4 @@
+import { failure, humanize, toast } from "../lib/toast";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -36,6 +37,7 @@ export default function AcceptInvite() {
     if (invite?.orgId) rememberJoinedOrg(invite.orgId);
     await refresh();
     await qc.invalidateQueries({ queryKey: ["orgs"] });
+    toast.success(`You joined ${invite?.orgName ?? "the organisation"} as ${humanize(invite?.role)}.`);
     navigate("/");
   }
 
@@ -44,6 +46,7 @@ export default function AcceptInvite() {
     setErr(null);
     if (password !== confirm) {
       setErr("Passwords don't match.");
+      toast.warning("The passwords you entered don't match.");
       return;
     }
     setBusy(true);
@@ -51,7 +54,7 @@ export default function AcceptInvite() {
       await api.register({ token, name, password });
       await finish();
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't create your account. The link may have expired.");
+      setErr(failure(e, "Couldn't create your account. The link may have expired."));
     } finally {
       setBusy(false);
     }
@@ -66,7 +69,7 @@ export default function AcceptInvite() {
       await api.acceptInvite(token);
       await finish();
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Sign-in failed.");
+      setErr(failure(e, "Sign-in failed."));
     } finally {
       setBusy(false);
     }
@@ -79,7 +82,7 @@ export default function AcceptInvite() {
       await api.acceptInvite(token);
       await finish();
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't accept the invite.");
+      setErr(failure(e, "Couldn't accept the invite."));
     } finally {
       setBusy(false);
     }

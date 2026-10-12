@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { Link, Navigate, useParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, Navigate, useLocation, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { isAdminOrAboveIn, useAuth } from "../auth";
@@ -9,6 +9,7 @@ import { Dropdown } from "../components/Dropdown";
 import { TablePagination } from "../components/TablePagination";
 import { useListParams } from "../lib/useListParams";
 import { TicketRow } from "../components/TicketRow";
+import { backState } from "../components/BackLink";
 import { IconArrowLeft, IconFolder, IconTicket, IconClock, IconCheckCircle } from "../components/Icons";
 
 const STATUS_OPTS = ["OPEN", "IN_PROGRESS", "DONE"];
@@ -21,10 +22,16 @@ export default function MemberDetail() {
   const { me } = useAuth();
   const { activeOrgId } = useOrg();
   const admin = isAdminOrAboveIn(me, activeOrgId);
-  const { filters, page, pageSize, setFilter, setPage, setPageSize, clearFilters } = useListParams({
+
+  // Filters, page and page size live in the URL; changing a filter or the
+  // page size returns to page 1 (page size is kept).
+  const { filters, page, pageSize, setFilter, setFilters, setPage, setPageSize, clearFilters } = useListParams({
     filters: { status: STATUS_OPTS, priority: PRIORITY_OPTS, type: TYPE_OPTS },
   });
   const listTop = useRef<HTMLDivElement>(null);
+  const projectsRef = useRef<HTMLElement>(null);
+  const [flashProjects, setFlashProjects] = useState(false);
+  const location = useLocation();
 
   const { data: detail, isLoading: detailLoading } = useQuery({
     queryKey: ["memberDetail", activeOrgId, userId],
@@ -49,12 +56,34 @@ export default function MemberDetail() {
         pageSize,
       }),
     enabled: !!activeOrgId && !!userId && admin,
+    // Keep current rows (dimmed) while the next page loads — but not across members.
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === userId ? prev : undefined),
   });
   const hasFilters = Object.keys(activeFilters).length > 0;
+
+  // Server clamps an out-of-range page to the last page; mirror it into the URL.
+  // Skip while `paged` is only placeholder data from the previous page —
+  // that would look like a clamp and bounce the user straight back.
   useEffect(() => {
     if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
   }, [paged, isPlaceholderData, page, setPage]);
+
+  // Everything opened from this page carries "Back to <member>" (with the exact
+  // filters/page the admin was looking at) in its router state.
+  const here = backState({ path: `${location.pathname}${location.search}`, label: detail?.name ?? "member" });
+
+  // Summary cards. The ticket cards reuse the page's own status filter (and
+  // clear priority/type so the list always matches the number on the card);
+  // the Projects card jumps to the project chips.
+  function showTickets(status: string) {
+    setFilters({ status, priority: "", type: "" });
+    window.setTimeout(() => listTop.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  }
+  function showProjects() {
+    projectsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setFlashProjects(true);
+    window.setTimeout(() => setFlashProjects(false), 1800);
+  }
 
   function goToPage(next: number) {
     setPage(next);
@@ -92,14 +121,19 @@ export default function MemberDetail() {
 
           {/* Summary cards */}
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <StatCard label="Projects" value={detail.projects.length} icon={<IconFolder size={18} />} color="#92613a" bg="#f3ebe0" />
-            <StatCard label="Assigned" value={detail.ticketCounts.total} icon={<IconTicket size={18} />} color="#5c4033" bg="#efe6dc" />
-            <StatCard label="In Progress" value={detail.ticketCounts.IN_PROGRESS} icon={<IconClock size={18} />} color="#b8860b" bg="#fdf6e3" />
-            <StatCard label="Done" value={detail.ticketCounts.DONE} icon={<IconCheckCircle size={18} />} color="#5a8a3c" bg="#f0f6ec" />
+            <StatCard testId="stat-projects" label="Projects" value={detail.projects.length} icon={<IconFolder size={18} />} color="#92613a" bg="#f3ebe0" onClick={showProjects} hint="Show projects" />
+            <StatCard testId="stat-assigned" label="Assigned" value={detail.ticketCounts.total} icon={<IconTicket size={18} />} color="#5c4033" bg="#efe6dc" onClick={() => showTickets("")} selected={!filters.status} hint="Show all assigned tickets" />
+            <StatCard testId="stat-in-progress" label="In Progress" value={detail.ticketCounts.IN_PROGRESS} icon={<IconClock size={18} />} color="#b8860b" bg="#fdf6e3" onClick={() => showTickets("IN_PROGRESS")} selected={filters.status === "IN_PROGRESS"} hint="Show in-progress tickets" />
+            <StatCard testId="stat-done" label="Done" value={detail.ticketCounts.DONE} icon={<IconCheckCircle size={18} />} color="#5a8a3c" bg="#f0f6ec" onClick={() => showTickets("DONE")} selected={filters.status === "DONE"} hint="Show done tickets" />
           </div>
 
           {/* Projects */}
-          <section>
+          <section
+            ref={projectsRef}
+            id="member-projects"
+            data-testid="member-projects"
+            className={`scroll-mt-4 rounded-2xl transition-shadow duration-500 ${flashProjects ? "ring-2 ring-primary/40 ring-offset-4 ring-offset-bg" : ""}`}
+          >
             <div className="eyebrow mb-3">Projects ({detail.projects.length})</div>
             {detail.projects.length === 0 ? (
               <div className="card p-6 text-sm text-muted">Not attached to any projects.</div>
@@ -109,6 +143,8 @@ export default function MemberDetail() {
                   <Link
                     key={p.id}
                     to={`/projects/${p.id}`}
+                    state={here}
+                    data-testid="member-project-chip"
                     className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-white px-3 py-1.5 text-sm font-medium text-fg-soft transition-colors hover:border-primary/30 hover:text-fg"
                   >
                     <IconFolder size={13} className="text-primary" />
@@ -173,7 +209,7 @@ export default function MemberDetail() {
                 </div>
               )}
               {paged?.items.map((t: any) => (
-                <TicketRow key={t.id} ticket={t} showProject />
+                <TicketRow key={t.id} ticket={t} showProject linkState={here} />
               ))}
             </div>
 
@@ -200,15 +236,33 @@ function StatCard({
   icon,
   color,
   bg,
+  onClick,
+  selected = false,
+  hint,
+  testId,
 }: {
   label: string;
   value: number;
   icon: React.ReactNode;
   color: string;
   bg: string;
+  onClick: () => void;
+  selected?: boolean;
+  hint: string;
+  testId: string;
 }) {
   return (
-    <div className="card p-4">
+    <button
+      type="button"
+      onClick={onClick}
+      title={hint}
+      aria-label={`${label}: ${value}. ${hint}`}
+      aria-pressed={selected}
+      data-testid={testId}
+      className={`card p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-elevated focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+        selected ? "ring-2 ring-primary/50" : ""
+      }`}
+    >
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl" style={{ background: bg, color }}>
           {icon}
@@ -220,6 +274,6 @@ function StatCard({
           <div className="text-xs font-medium text-muted">{label}</div>
         </div>
       </div>
-    </div>
+    </button>
   );
 }

@@ -12,12 +12,16 @@ export type EmailProvider = "brevo" | "smtp" | "both" | "console";
 const brevoApiKey = process.env.BREVO_API_KEY ?? "";
 
 const defaultFrontendHost = process.env.FRONTEND_HOST ?? getPrimaryNetworkAddress() ?? "localhost";
-const defaultFrontendOrigin = `http://${defaultFrontendHost}`;
+const defaultFrontendOrigin = `http://${defaultFrontendHost}:1020`;
 
 const fixedFrontendOrigins = [
   "https://ticketmanagement.site",
   "https://www.ticketmanagement.site",
+  "https://ticketmanagement.site:1020",
+  "https://www.ticketmanagement.site:1020",
+  "http://localhost:1020",
   "http://localhost:5173",
+  "https://localhost:1020",
   defaultFrontendOrigin,
 ];
 
@@ -27,10 +31,7 @@ export function getCorsOrigins(value?: string, fallback = defaultFrontendOrigin)
     .map((origin) => origin.trim())
     .filter(Boolean);
 
-  // Prefer explicit sources (from FRONTEND_URL) first so deployments
-  // that set a custom origin (including non-standard ports) take priority
-  // over the built-in fixed list used for local dev/testing.
-  const uniqueOrigins = [...new Set([...sources, ...fixedFrontendOrigins])];
+  const uniqueOrigins = [...new Set([...fixedFrontendOrigins, ...sources])];
   return uniqueOrigins.length > 0 ? uniqueOrigins : [fallback];
 }
 
@@ -79,30 +80,20 @@ export const env = {
   frontendUrl: getCorsOrigins(process.env.FRONTEND_URL, defaultFrontendOrigin)[0],
   frontendOrigins: getCorsOrigins(process.env.FRONTEND_URL, defaultFrontendOrigin),
 
-  // Transactional email (signup OTPs, invites, password resets).
-  //   production : Brevo's HTTP API (Render blocks outbound SMTP ports on its
-  //                free tier — see lib/email.ts for the full story)
-  //   development: Mailpit over plain SMTP (localhost:1025, UI on :8025)
-  //   console    : just prints the email to the server log
-  // See resolveEmailProvider() above and the "Email" section of the README.
   email: {
     provider: resolveEmailProvider(),
     brevoApiKey,
     from: process.env.SMTP_FROM ?? "Ticketmanagement <no-reply@example.com>",
-    // Only used by the "smtp" provider. Defaults match Mailpit's.
     smtp: {
       host: process.env.SMTP_HOST ?? "localhost",
       port: Number(process.env.SMTP_PORT ?? 1025),
     },
-    /** True when a real transport is active (drives the "password reset available" flag). */
     get enabled() {
       return this.provider === "smtp" || this.provider === "both" || (this.provider === "brevo" && Boolean(this.brevoApiKey));
     },
   },
 
   twoFactorCookieName: process.env.TWO_FACTOR_COOKIE_NAME ?? "tm_2fa_pending",
-
-  // Attachments (local disk for now; swap to S3/R2 for production PaaS).
   uploadDir: process.env.UPLOAD_DIR ?? "uploads",
   maxUploadMb: Number(process.env.MAX_UPLOAD_MB ?? 10),
 };

@@ -1,5 +1,5 @@
 import { prisma } from "../prisma.js";
-import { type DateWindow, type WorkRange } from "./dateRanges.js";
+import { type DateWindow } from "./dateRanges.js";
 
 const userSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
 
@@ -32,21 +32,10 @@ export function serializeTicket(t: any) {
 export interface CompletedWorkScope {
   orgId: string;
   userId: string;
-  /** Prisma `where` fragment scoping which projects are visible — SA/Admin
-   *  get {}, clients/developers get their respective attachment rules. */
   projectScope: Record<string, unknown>;
   searchWhere: Record<string, unknown>;
   window: DateWindow;
-  range: WorkRange;
 }
-
-/**
- * Resolves the actual completion date for a set of DONE tickets: the most
- * recent transition-to-DONE recorded in TicketStatusHistory. Tickets marked
- * DONE before that model existed have no history row at all — the caller
- * falls back to `updatedAt` for those (see loadCompletedInScope below), so
- * pre-existing completed tickets don't silently vanish from the list.
- */
 async function resolveCompletionDates(ticketIds: string[]): Promise<Map<string, Date>> {
   if (ticketIds.length === 0) return new Map();
   const rows = await prisma.ticketStatusHistory.findMany({
@@ -56,32 +45,17 @@ async function resolveCompletionDates(ticketIds: string[]): Promise<Map<string, 
   });
   const map = new Map<string, Date>();
   for (const row of rows) {
-    // Rows are ordered most-recent-first, so the first one seen per ticket
-    // is its latest transition to DONE (relevant if it was completed,
-    // reopened, then completed again — we want the latest completion).
     if (!map.has(row.ticketId)) map.set(row.ticketId, row.changedAt);
   }
   return map;
 }
-
-/**
- * All of this user's DONE tickets in scope, each with a resolved completion
- * date, filtered to the selected range by that date (not paginated —
- * callers slice/count as needed). Sorted most-recently-completed first.
- *
- * Data volumes here are inherently small (one person's own completed
- * tickets), so fetching the full set and filtering/sorting in application
- * code is simpler and more obviously correct than trying to express "latest
- * matching history row per ticket, filtered by date" as a single Prisma
- * query — and avoids the ambiguity of a relation `some` filter matching on
- * a stale historical row instead of the ticket's true latest completion.
- */
 export async function loadCompletedInScope(scope: CompletedWorkScope) {
-  const { orgId, userId, projectScope, searchWhere, window, range } = scope;
+  const { orgId, userId, projectScope, searchWhere, window } = scope;
   const doneTickets = await prisma.ticket.findMany({
     where: {
       assigneeId: userId,
       status: "DONE",
+      archivedAt: null,
       project: { orgId, ...projectScope },
       ...searchWhere,
     } as any,
@@ -93,13 +67,10 @@ export async function loadCompletedInScope(scope: CompletedWorkScope) {
     ticket: t,
     completedAt: completionDates.get(t.id) ?? t.updatedAt,
   }));
-
-  const unbounded = range === "current" || !window.start || !window.end;
-  const filtered = unbounded
-    ? withDates
-    : withDates.filter(
-        ({ completedAt }) => completedAt >= window.start! && completedAt <= window.end!,
-      );
+  const filtered = withDates.filter(
+    ({ completedAt }) =>
+      (!window.start || completedAt >= window.start) && (!window.end || completedAt <= window.end),
+  );
 
   filtered.sort((a, b) => b.completedAt.getTime() - a.completedAt.getTime());
   return filtered;

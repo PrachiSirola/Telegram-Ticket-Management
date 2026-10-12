@@ -16,15 +16,6 @@ export function verifySession(token: string): SessionPayload | null {
     return null;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Two-factor "pending" challenge — issued right after password verification
-// succeeds but BEFORE the PIN step, so we know which user is completing 2FA
-// without granting a real session yet. Short-lived (5 min) and marked with
-// `purpose` so it can never be mistaken for (or replayed as) a full session
-// token, even though both are signed with the same jwtSecret.
-// ---------------------------------------------------------------------------
-
 export interface TwoFactorChallengePayload {
   userId: string;
   purpose: "2fa-pending";

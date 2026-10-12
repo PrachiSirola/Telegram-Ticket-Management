@@ -5,16 +5,6 @@ import { canAccessOrg, isClient, membershipIn, orgRole, type AuthUser } from "./
 import { developerCanAccessProject } from "./projectAccess.js";
 
 export type TicketWithProject = Ticket & { project: Project };
-
-/**
- * Can this user open this ticket? Active member of the project's org, and —
- * for clients — attached to the project (and the ticket not archived); for
- * developers, explicitly assigned to the project OR assigned at least one
- * ticket in it (see lib/projectAccess.ts).
- *
- * Archived tickets are hidden from customers entirely; the internal team can
- * still open them (read-only until restored).
- */
 export async function userCanAccessTicket(
   user: AuthUser,
   ticket: TicketWithProject,
@@ -37,12 +27,6 @@ export async function userCanAccessTicket(
   }
   return true;
 }
-
-/**
- * Loads a ticket by req.params.id (with its project) and verifies the user can
- * access it (userCanAccessTicket). Returns the ticket, or null after sending a
- * 404 response.
- */
 export async function loadTicketForUser(
   req: Request,
   res: Response,
@@ -57,9 +41,14 @@ export async function loadTicketForUser(
   }
   return ticket;
 }
-
-/** Archived tickets are read-only: send 409 and return true when blocked. */
-export function rejectIfArchived(ticket: Ticket, res: Response): boolean {
+export function rejectIfArchived(
+  ticket: Ticket & { project?: { archivedAt: Date | null } | null },
+  res: Response,
+): boolean {
+  if (ticket.project?.archivedAt) {
+    res.status(409).json({ error: "This project is archived. Restore it before making changes." });
+    return true;
+  }
   if (!ticket.archivedAt) return false;
   res.status(409).json({ error: "This ticket is archived. Restore it before making changes." });
   return true;

@@ -1,3 +1,4 @@
+import { toast } from "../lib/toast";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
@@ -13,6 +14,7 @@ export default function ForgotPassword() {
     await api.forgotPassword(email).catch(() => {});
     setBusy(false);
     setSent(true);
+    toast.info("If an account exists for that email, a reset link is on its way.");
   }
 
   return (

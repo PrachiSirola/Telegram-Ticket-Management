@@ -1,3 +1,4 @@
+import { humanize, toast } from "../lib/toast";
 import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -9,6 +10,7 @@ import { Dropdown, MultiDropdown } from "../components/Dropdown";
 import { Pagination } from "../components/Pagination";
 import { Avatar } from "../components/ui";
 import { IconPlus, IconSearch } from "../components/Icons";
+import { BulkInviteModal } from "../components/BulkInviteModal";
 import { isAllowedEmailDomain } from "../lib/emailDomains";
 import type { OrgMember } from "../types";
 import { EmailDomainInput } from "../components/EmailDomainInput";
@@ -53,25 +55,51 @@ export default function Members() {
   });
 
   const [removing, setRemoving] = useState<OrgMember | null>(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   const patchMember = useMutation({
     mutationFn: ({ userId, data }: { userId: string; data: { role?: any; disabled?: boolean } }) =>
       api.updateMember(activeOrgId, userId, data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["orgMembers", activeOrgId] }),
+    meta: { errorTitle: "Couldn't update the member" },
+    onMutate: ({ userId }) => {
+      const m = members?.find((x) => x.userId === userId);
+      return { name: m?.name ?? "The member", role: m?.role, disabled: m?.disabled };
+    },
+    onSuccess: (_res, { data }, before) => {
+      const name = before?.name ?? "The member";
+      if (data.role && data.role !== before?.role)
+        toast.success(`${name}'s role changed from ${humanize(before?.role)} to ${humanize(data.role)}.`);
+      else if (typeof data.disabled === "boolean")
+        toast.success(data.disabled ? `${name}'s account was disabled. They can no longer sign in.` : `${name}'s account was re-enabled.`);
+      else toast.success(`${name} was updated.`);
+      qc.invalidateQueries({ queryKey: ["orgMembers", activeOrgId] });
+    },
   });
   const removeMember = useMutation({
     mutationFn: (userId: string) => api.removeMember(activeOrgId, userId),
+    meta: { errorTitle: "Couldn't remove the member" },
     onSuccess: () => {
+      toast.success(`${removing?.name ?? "The member"} was removed from ${activeOrg?.name ?? "the organisation"}.`);
       setRemoving(null);
       qc.invalidateQueries({ queryKey: ["orgMembers", activeOrgId] });
     },
   });
   const revoke = useMutation({
     mutationFn: (inviteId: string) => api.revokeInvite(activeOrgId, inviteId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["invites", activeOrgId] }),
+    meta: { errorTitle: "Couldn't revoke the invitation" },
+    onSuccess: (_d, inviteId) => {
+      const email = invites?.find((i) => i.id === inviteId)?.email;
+      toast.success(`Invitation${email ? ` for ${email}` : ""} was revoked.`);
+      qc.invalidateQueries({ queryKey: ["invites", activeOrgId] });
+    },
   });
   const resend = useMutation({
     mutationFn: (inviteId: string) => api.resendInvite(activeOrgId, inviteId),
+    meta: { errorTitle: "Couldn't resend the invitation" },
+    onSuccess: (_d, inviteId) => {
+      const email = invites?.find((i) => i.id === inviteId)?.email;
+      toast.success(`Invitation resent${email ? ` to ${email}` : ""}.`);
+    },
   });
 
   // If removing the last member on a page empties it (and it's not page 1),
@@ -89,9 +117,15 @@ export default function Members() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <div className="eyebrow mb-1">{activeOrg?.name}</div>
-        <h1 className="text-2xl font-bold tracking-tight text-fg">Members</h1>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="eyebrow mb-1">{activeOrg?.name}</div>
+          <h1 className="text-2xl font-bold tracking-tight text-fg">Members</h1>
+        </div>
+        <button className="btn btn-secondary btn-sm" onClick={() => setBulkOpen(true)}>
+          <IconPlus size={15} />
+          Bulk invite
+        </button>
       </div>
 
       <InviteForm
@@ -220,6 +254,15 @@ export default function Members() {
         )}
       </section>
 
+      <BulkInviteModal
+        key={activeOrgId /* a workspace switch starts a fresh form */}
+        open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        orgId={activeOrgId}
+        orgName={activeOrg?.name ?? ""}
+        canInviteAdmin={sa}
+      />
+
       <ConfirmModal
         open={!!removing}
         title="Remove member?"
@@ -270,7 +313,9 @@ function InviteForm({
         role,
         ...(role === "CLIENT" || role === "DEVELOPER" ? { projectIds } : {}),
       }),
-    onSuccess: () => {
+    meta: { errorTitle: "Couldn't create the invitation" },
+    onSuccess: (data) => {
+      toast.success(`Invitation for ${data.email} created as ${humanize(data.role ?? role)}. Copy the link below to share it directly.`);
       setEmail("");
       setEmailTouched(false);
       setProjectIds([]);
@@ -365,7 +410,10 @@ function CopyLink({ url }: { url: string }) {
       <button
         className="btn btn-secondary btn-sm shrink-0"
         onClick={() => {
-          navigator.clipboard.writeText(url);
+          navigator.clipboard.writeText(url).then(
+            () => toast.success("Invitation link copied to clipboard."),
+            () => toast.error("Couldn't copy the link. Select it and copy manually."),
+          );
           setCopied(true);
         }}
       >

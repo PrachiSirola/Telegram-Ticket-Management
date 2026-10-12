@@ -1,3 +1,4 @@
+import { failure, toast } from "../lib/toast";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
@@ -30,14 +31,16 @@ export default function ResetPassword() {
     setErr(null);
     if (password !== confirm) {
       setErr("Passwords don't match.");
+      toast.warning("The passwords you entered don't match.");
       return;
     }
     setBusy(true);
     try {
       await api.resetPassword({ token, password });
       setDone(true);
+      toast.success("Your password was reset. You can now sign in.");
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't reset your password. The link may have expired.");
+      setErr(failure(e, "Couldn't reset your password. The link may have expired."));
     } finally {
       setBusy(false);
     }

@@ -15,8 +15,6 @@ import { env } from "../env.js";
 import { paginate, parsePageParams, TICKET_TIEBREAK } from "../lib/pagination.js";
 
 export const orgsRouter = Router();
-
-/** Mask a secret for display: keep the last 4 chars. */
 function mask(secret: string | null): string | null {
   if (!secret) return null;
   return `••••${secret.slice(-4)}`;
@@ -27,33 +25,29 @@ function serializeOrg(org: {
   name: string;
   telegramBotToken: string | null;
   telegramChatId: string | null;
+  timezone: string;
 }) {
   return {
     id: org.id,
     name: org.name,
+    timezone: org.timezone,
     telegramBotToken: mask(org.telegramBotToken),
     telegramChatId: org.telegramChatId,
     telegramConfigured: Boolean(org.telegramBotToken && org.telegramChatId),
   };
 }
-
-// List my organisations (with my role in each).
 orgsRouter.get("/", requireAuth, async (req, res) => {
   const user = req.user!;
   const orgs = await prisma.organization.findMany({
     where: { id: { in: user.memberships.map((m) => m.orgId) } },
     orderBy: { name: "asc" },
-    select: { id: true, name: true },
+    select: { id: true, name: true, timezone: true },
   });
   res.json(
-    orgs.map((o) => ({ id: o.id, name: o.name, role: orgRole(user, o.id) })),
+    orgs.map((o) => ({ id: o.id, name: o.name, timezone: o.timezone, role: orgRole(user, o.id) })),
   );
 });
 
-// Create a new organisation — a two-step, email-confirmed flow restricted to
-// Super Admins (see lib/access.ts canCreateOrganisation). Admins, Developers
-// and Clients are refused here regardless of what the UI shows. Step 1 here just sends the confirmation email; the org is
-// only actually created once that link is clicked (see /create/verify below).
 const createRequestSchema = z.object({ name: z.string().min(1).max(100) });
 orgsRouter.post("/create/request", requireAuth, async (req, res) => {
   if (!canCreateOrganisation(req.user!)) {
@@ -76,7 +70,6 @@ orgsRouter.post("/create/request", requireAuth, async (req, res) => {
   }
 });
 
-// Step 2: consumes the emailed link and actually creates the organisation.
 const createVerifySchema = z.object({ token: z.string().min(1) });
 orgsRouter.post("/create/verify", requireAuth, async (req, res) => {
   const parsed = createVerifySchema.safeParse(req.body);
@@ -91,15 +84,21 @@ orgsRouter.post("/create/verify", requireAuth, async (req, res) => {
   }
 });
 
-// Org settings (name, Telegram). Super Admin only. Bot token is write-only:
-// responses carry a masked value; sending an empty string clears it.
+const isValidTimeZone = (tz: string) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+};
 const updateSchema = z.object({
   name: z.string().min(1).max(100).optional(),
+  timezone: z.string().max(64).refine(isValidTimeZone, "Unknown timezone").optional(),
   telegramBotToken: z.string().max(200).optional(),
   telegramChatId: z.string().max(100).optional(),
 });
 
-// Settings are visible to SA and Admins (Admins only get the Telegram part).
 orgsRouter.get(
   "/:orgId/settings",
   requireAuth,
@@ -120,14 +119,17 @@ orgsRouter.patch(
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
     const b = parsed.data;
-    // Admins may only manage Telegram config; renaming the org is SA-only.
     if (b.name !== undefined && !isOrgSA(req.user!, req.params.orgId)) {
       return res.status(403).json({ error: "Only the Super Admin can rename the organisation" });
+    }
+    if (b.timezone !== undefined && !isOrgSA(req.user!, req.params.orgId)) {
+      return res.status(403).json({ error: "Only the Super Admin can change the organisation timezone" });
     }
     const org = await prisma.organization.update({
       where: { id: req.params.orgId },
       data: {
         ...(b.name !== undefined ? { name: b.name.trim() } : {}),
+        ...(b.timezone !== undefined ? { timezone: b.timezone } : {}),
         ...(b.telegramBotToken !== undefined
           ? { telegramBotToken: b.telegramBotToken || null }
           : {}),
@@ -138,7 +140,6 @@ orgsRouter.patch(
   },
 );
 
-// Delete the organisation (cascades projects, tickets, memberships, invites).
 orgsRouter.delete(
   "/:orgId",
   requireAuth,
@@ -150,9 +151,6 @@ orgsRouter.delete(
   },
 );
 
-// Hand the Super Admin role to an existing Admin; the old SA becomes an Admin.
-// Single transaction (demote first — the partial unique index enforces the
-// exactly-one-SA invariant).
 const transferSchema = z.object({ userId: z.string().min(1) });
 orgsRouter.post(
   "/:orgId/transfer-ownership",
@@ -183,16 +181,6 @@ orgsRouter.post(
   },
 );
 
-// ---------------------------------------------------------------------------
-// Members
-// ---------------------------------------------------------------------------
-
-// Full member list (incl. disabled) — management view for SA/Admin.
-//
-// Pagination is OPT-IN, same convention as the projects list: `page` present
-// → `{ items, total, page, pageSize }` envelope (used by the Members page);
-// omitted → the plain array as always (used by OrgSettings' ownership-transfer
-// admin picker, which needs the complete list regardless of any page state).
 const MEMBERS_MAX_PAGE_SIZE = 100;
 
 orgsRouter.get(
@@ -288,11 +276,6 @@ function serializeMemberTicket(t: any) {
     updatedAt: t.updatedAt,
   };
 }
-
-// Single member's profile view: their role/status plus which projects they
-// have access to and how their assigned tickets break down by status.
-// SA/Admin implicitly have every org project; Developer/Client access is
-// explicit (ProjectDeveloper/ProjectClient), so both tables are checked.
 orgsRouter.get(
   "/:orgId/members/:userId/detail",
   requireAuth,
@@ -308,10 +291,11 @@ orgsRouter.get(
 
     const projects =
       membership.role === "SUPER_ADMIN" || membership.role === "ADMIN"
-        ? await prisma.project.findMany({ where: { orgId }, select: { id: true, name: true }, orderBy: { name: "asc" } })
+        ? await prisma.project.findMany({ where: { orgId, archivedAt: null }, select: { id: true, name: true }, orderBy: { name: "asc" } })
         : await prisma.project.findMany({
             where: {
               orgId,
+              archivedAt: null, // archived projects are hidden everywhere except the Archived tab
               OR: [
                 { developers: { some: { membershipId: membership.id } } },
                 { clients: { some: { membershipId: membership.id } } },
@@ -323,7 +307,7 @@ orgsRouter.get(
 
     const counts = await prisma.ticket.groupBy({
       by: ["status"],
-      where: { assigneeId: membership.userId, archivedAt: null, project: { orgId } },
+      where: { assigneeId: membership.userId, archivedAt: null, project: { orgId, archivedAt: null } },
       _count: true,
     });
     const ticketCounts = { OPEN: 0, IN_PROGRESS: 0, DONE: 0 };
@@ -347,8 +331,6 @@ orgsRouter.get(
   },
 );
 
-// Paginated, filterable list of tickets assigned to this member across the
-// org (any project) — powers the Member Detail page's ticket table.
 orgsRouter.get(
   "/:orgId/members/:userId/tickets",
   requireAuth,
@@ -363,15 +345,11 @@ orgsRouter.get(
     const where = {
       assigneeId: req.params.userId,
       archivedAt: null,
-      project: { orgId },
+      project: { orgId, archivedAt: null },
       ...(status ? { status } : {}),
       ...(priority ? { priority } : {}),
       ...(type ? { type } : {}),
     };
-
-    // Always paginated (existing behaviour). Default page size stays 10 for
-    // callers that don't send one; max is now 100 to match the UI options.
-    // `id` tiebreak keeps the order total so pages never overlap/skip.
     const paged = await paginate(
       parsePageParams(req.query, 10),
       () => prisma.ticket.count({ where }),
@@ -387,13 +365,6 @@ orgsRouter.get(
     res.json({ ...paged, items: paged.items.map(serializeMemberTicket) });
   },
 );
-
-/**
- * Guard for member-management writes. Rules:
- *  - The SA membership can never be modified (only transfer/delete-org).
- *  - You can't modify yourself.
- *  - ADMIN targets: SA only. DEVELOPER/CLIENT targets: SA or ADMIN.
- */
 async function loadManagedMember(req: any, res: any) {
   const orgId = req.params.orgId;
   const target = await prisma.orgMembership.findUnique({

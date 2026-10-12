@@ -1,13 +1,12 @@
+import { apiError, toast } from "../lib/toast";
 import { useState, useEffect } from "react";
 import { api } from "../lib/api";
-import { IconLock, IconCheckCircle } from "./Icons";
-import { Modal } from "./Modal";
+import { IconLock } from "./Icons";
 
 export function TwoFactorCard() {
   const [status, setStatus] = useState<{ twoFactorEnabled: boolean; hasPin: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [justEnabled, setJustEnabled] = useState<boolean | null>(null); 
 
   useEffect(() => {
     api.twoFactorStatus().then(setStatus);
@@ -18,15 +17,22 @@ export function TwoFactorCard() {
     setErr(null);
     if (!status.twoFactorEnabled && !status.hasPin) {
       setErr("Set a PIN first, then enable 2FA.");
+      toast.warning("Register a passkey first to enable secure sign-in.");
       return;
     }
     setBusy(true);
     try {
       const next = await api.toggle2fa({ enabled: !status.twoFactorEnabled, method: "PIN" });
       setStatus((s) => (s ? { ...s, twoFactorEnabled: next.twoFactorEnabled } : s));
-      setJustEnabled(next.twoFactorEnabled);
+      toast.success(
+        next.twoFactorEnabled
+          ? "Passkey authentication is enabled. You'll use your passkey each time you sign in."
+          : "Passkey authentication disabled. You'll no longer be asked for a passkey when signing in.",
+      );
     } catch (e: any) {
-      setErr(e?.response?.data?.error ?? "Couldn't update 2FA.");
+      const msg = e?.response?.data?.error ?? "Couldn't update passkey authentication.";
+      setErr(msg);
+      toast.error(apiError(e, msg), { title: "Couldn't update passkey authentication" });
     } finally {
       setBusy(false);
     }
@@ -34,7 +40,7 @@ export function TwoFactorCard() {
 
   return (
     <div className="card p-6">
-      <div className="eyebrow mb-4">Two-factor authentication</div>
+      <div className="eyebrow mb-4">Passkey authentication</div>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm text-fg-soft">
           <IconLock size={16} />
@@ -50,26 +56,6 @@ export function TwoFactorCard() {
         </button>
       </div>
       {err && <p className="mt-3 text-sm text-danger">{err}</p>}
-
-      <Modal
-        open={justEnabled !== null}
-        onClose={() => setJustEnabled(null)}
-        title={justEnabled ? "2FA enabled" : "2FA disabled"}
-      >
-        <div className="flex items-start gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ok-bg text-ok">
-            <IconCheckCircle size={18} />
-          </div>
-          <p className="pt-1.5 text-sm text-fg-soft">
-            {justEnabled
-              ? "You'll now be asked for your PIN each time you sign in."
-              : "You'll no longer be asked for a PIN when signing in."}
-          </p>
-        </div>
-        <button className="btn btn-primary btn-block mt-5" onClick={() => setJustEnabled(null)}>
-          Got it
-        </button>
-      </Modal>
     </div>
   );
 }

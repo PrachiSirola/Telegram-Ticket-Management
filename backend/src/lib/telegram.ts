@@ -2,11 +2,6 @@ export interface TelegramConfig {
   botToken: string;
   chatId: string;
 }
-
-/**
- * Post a message to an org's Telegram chat. No-op (console log) when the org
- * hasn't configured Telegram. Never throws.
- */
 export async function sendTelegram(cfg: TelegramConfig | null, text: string) {
   if (!cfg?.botToken || !cfg.chatId) {
     console.log(`\n[telegram:console]\n${text}\n`);

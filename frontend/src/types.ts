@@ -4,22 +4,18 @@ export type TicketStatus = "OPEN" | "IN_PROGRESS" | "DONE";
 export type TicketPriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
 export type TicketType = "BUG" | "FEATURE" | "TASK";
 export type CommentVisibility = "INTERNAL" | "CLIENT_VISIBLE";
-/** Attachments add "Selected Members" on top of the comment visibilities. */
 export type AttachmentVisibility = "INTERNAL" | "CLIENT_VISIBLE" | "SELECTED";
 
-export type WorkRange = "current" | "today" | "week" | "prev_week" | "month" | "prev_month" | "custom";
+export type WorkRange = "all" | "today" | "last_24h" | "last_3d" | "last_7d" | "last_1m" | "last_1y" | "custom";
 export type WorkStatusFilter = "all" | "pending" | "in_progress" | "completed" | "overdue";
-export type ProjectStatusFilter = "new" | "active" | "closed" | undefined;
+export type ProjectStatusFilter = "current" | "new" | "active" | "closed" | "archived" | undefined;
 
-/** Envelope shape for opt-in server-side pagination (projects, org members). */
 export interface Paged<T> {
   items: T[];
   total: number;
   page: number;
   pageSize: number;
 }
-
-/** Ticket lists: the generic envelope plus the extra metadata the ticket endpoints send. */
 export interface TicketPage<T> extends Paged<T> {
   totalPages: number;
   hasNext: boolean;
@@ -28,6 +24,8 @@ export interface TicketPage<T> extends Paged<T> {
 
 export interface ProjectCounts {
   all: number;
+  current: number;
+  archived: number;
   new: number;
   active: number;
   closed: number;
@@ -47,13 +45,15 @@ export interface Me {
 export interface Organization {
   id: string;
   name: string;
+  timezone: string;
   role: OrgRole;
 }
 
 export interface OrgSettings {
   id: string;
   name: string;
-  telegramBotToken: string | null; // masked by the API
+  timezone: string;
+  telegramBotToken: string | null; 
   telegramChatId: string | null;
   telegramConfigured: boolean;
 }
@@ -64,6 +64,12 @@ export interface Project {
   description: string;
   ticketCount: number;
   createdAt: string;
+  archivedAt?: string | null;
+}
+export interface ProjectImpact {
+  tickets: number;
+  comments: number;
+  attachments: number;
 }
 
 export interface OrgMember {
@@ -86,6 +92,19 @@ export interface OrgInvite {
   projectIds: string[];
   expiresAt: string;
   inviteUrl: string | null;
+}
+
+export interface BulkInviteResult {
+  email: string;
+  status: "invited" | "skipped" | "invalid";
+  reason?: string;
+  emailSent?: boolean;
+  inviteUrl?: string;
+}
+
+export interface BulkInviteResponse {
+  results: BulkInviteResult[];
+  summary: { total: number; invited: number; emailFailed: number; skipped: number; invalid: number };
 }
 
 export interface InviteInfo {
@@ -114,7 +133,7 @@ export interface Ticket {
   id: string;
   projectId: string;
   orgId?: string;
-  project?: { id: string; name: string };
+  project?: { id: string; name: string; archivedAt?: string | null };
   title: string;
   description: string;
   status: TicketStatus;
@@ -124,9 +143,7 @@ export interface Ticket {
   estimate: number | null;
   assignee: UserLite | null;
   reporter: UserLite | null;
-  /** Set when the ticket is archived (hidden from lists + customers, restorable). */
   archivedAt?: string | null;
-  /** Only on GET /tickets/:id — what the signed-in user may do (enforced again by the API). */
   can?: TicketPermissions;
   following?: boolean;
   followerCount?: number;
@@ -256,4 +273,6 @@ export interface MyWorkResponse {
   summary: MyWorkSummary;
   work: Paged<Ticket>;
   completedWork: Paged<CompletedTicket>;
+  /** The resolved window (org timezone) the server applied. */
+  window?: { range: WorkRange; fromDay: string | null; toDay: string | null; timezone: string };
 }

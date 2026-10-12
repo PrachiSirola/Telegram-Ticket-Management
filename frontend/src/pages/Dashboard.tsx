@@ -5,17 +5,33 @@ import { api } from "../lib/api";
 import { isAdminOrAboveIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
-import { ConfirmModal } from "../components/ConfirmModal";
+import { MenuButton } from "../components/ActionMenu";
+import { q, toast } from "../lib/toast";
+import {
+  ArchiveProjectModal,
+  DeleteProjectModal,
+  EditProjectModal,
+  RestoreProjectModal,
+} from "../components/ProjectModals";
 import { Pagination } from "../components/Pagination";
 import { TablePagination } from "../components/TablePagination";
 import { useListParams } from "../lib/useListParams";
-import { IconFolder, IconPlus, IconArrowRight, IconTrash, IconSearch } from "../components/Icons";
-import type { Project, ProjectCounts, ProjectStatusFilter } from "../types";
+import {
+  IconFolder,
+  IconPlus,
+  IconArrowRight,
+  IconTrash,
+  IconSearch,
+  IconMoreHorizontal,
+  IconEdit,
+  IconArchive,
+} from "../components/Icons";
+import type { Project, ProjectCounts, ProjectStatusFilter, TicketPriority, TicketStatus } from "../types";
 import { Dropdown } from "../components/Dropdown";
 
 function HeroIllustration() {
   const S = "#F2D9B8";          
-  const F = "#F2D9B8";        
+  const F = "#F2D9B8";          
   return (
     <svg
       viewBox="0 0 520 220"
@@ -105,12 +121,27 @@ function HeroIllustration() {
 export default function Dashboard() {
   const { me } = useAuth();
   const { activeOrgId } = useOrg();
-  const { filters, page, pageSize, setFilter: setListFilter, setPage, setPageSize } = useListParams({
+  const { filters, page, pageSize, setFilter: setListFilter, setFilters, setPage, setPageSize } = useListParams({
     pageKey: "tpage",
     sizeKey: "tsize",
-    filters: { tview: ["assigned", "reported"] },
+    filters: {
+      tview: ["assigned", "reported"],
+      tstatus: ["IN_PROGRESS", "DONE", "ALL"],
+      tpriority: ["LOW", "MEDIUM", "HIGH", "URGENT"],
+    },
+    dateKeys: ["tfrom", "tto"],
   });
   const filter = (filters.tview || "assigned") as "assigned" | "reported";
+  const statusSel = filters.tstatus || "OPEN"; // what the dropdown shows
+  const apiStatus = statusSel === "ALL" ? undefined : (statusSel as TicketStatus);
+  const prioritySel = (filters.tpriority || undefined) as TicketPriority | undefined;
+  const dueFrom = filters.tfrom || undefined;
+  const dueTo = filters.tto || undefined;
+  const atDefault = statusSel === "OPEN" && !prioritySel && !dueFrom && !dueTo;
+  const onlyDefaultStatus = statusSel === "OPEN" && !prioritySel && !dueFrom && !dueTo;
+  function resetTicketFilters() {
+    setFilters({ tstatus: "", tpriority: "", tfrom: "", tto: "" }); // keeps Assigned/Reported + page size
+  }
   const listTop = useRef<HTMLDivElement>(null);
   const {
     data: paged,
@@ -120,8 +151,9 @@ export default function Dashboard() {
     isError,
     refetch,
   } = useQuery({
-    queryKey: ["myTickets", activeOrgId, filter, page, pageSize],
-    queryFn: () => api.myTicketsPaged(activeOrgId, filter, { page, pageSize }),
+    queryKey: ["myTickets", activeOrgId, filter, page, pageSize, apiStatus ?? "ALL", prioritySel ?? "", dueFrom ?? "", dueTo ?? ""],
+    queryFn: () =>
+      api.myTicketsPaged(activeOrgId, filter, { page, pageSize, status: apiStatus, priority: prioritySel, dueFrom, dueTo }),
     enabled: !!activeOrgId,
     placeholderData: (prev, prevQuery) =>
       prevQuery?.queryKey[1] === activeOrgId && prevQuery?.queryKey[2] === filter ? prev : undefined,
@@ -184,6 +216,69 @@ export default function Dashboard() {
             ))}
           </div>
         </div>
+
+        {/* Filters: Open by default; they combine, and apply to every ticket server-side. */}
+        <div className="mb-3 flex flex-wrap items-center gap-2" data-testid="ticket-filters">
+          <Dropdown
+            className="w-40"
+            size="sm"
+            placeholder="Open"
+            value={filters.tstatus ?? ""}
+            onChange={(v) => setListFilter("tstatus", v)}
+            options={[
+              { value: "", label: "Open" },
+              { value: "IN_PROGRESS", label: "In Progress" },
+              { value: "DONE", label: "Done" },
+              { value: "ALL", label: "All statuses" },
+            ]}
+          />
+          <Dropdown
+            className="w-40"
+            size="sm"
+            placeholder="All priorities"
+            value={filters.tpriority ?? ""}
+            onChange={(v) => setListFilter("tpriority", v)}
+            options={[
+              { value: "", label: "All priorities" },
+              ...["LOW", "MEDIUM", "HIGH", "URGENT"].map((p) => ({ value: p, label: p })),
+            ]}
+          />
+          <label className="flex items-center gap-1.5 text-xs font-medium text-muted">
+            Due from
+            <input
+              type="date"
+              className="input"
+              style={{ width: 146, minHeight: 36, padding: "0 10px", fontSize: 13 }}
+              aria-label="Due from"
+              value={filters.tfrom ?? ""}
+              max={filters.tto || undefined}
+              onChange={(e) => setFilters({ tfrom: e.target.value, ...(e.target.value && filters.tto && e.target.value > filters.tto ? { tto: e.target.value } : {}) })}
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs font-medium text-muted">
+            to
+            <input
+              type="date"
+              className="input"
+              style={{ width: 146, minHeight: 36, padding: "0 10px", fontSize: 13 }}
+              aria-label="Due to"
+              value={filters.tto ?? ""}
+              min={filters.tfrom || undefined}
+              onChange={(e) => setFilters({ tto: e.target.value, ...(e.target.value && filters.tfrom && e.target.value < filters.tfrom ? { tfrom: e.target.value } : {}) })}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm ml-auto"
+            data-testid="ticket-filters-reset"
+            disabled={atDefault}
+            title="Back to Open tickets, no other filters"
+            onClick={resetTicketFilters}
+          >
+            Reset
+          </button>
+        </div>
+
         <div ref={listTop} className="scroll-mt-4" />
         <div
           className={`card divide-line overflow-hidden transition-opacity ${
@@ -209,8 +304,23 @@ export default function Dashboard() {
               <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-accent text-primary">
                 <IconFolder size={20} />
               </div>
-              <p className="text-sm font-medium text-fg-soft">No tickets here yet.</p>
-              <p className="mt-1 text-xs text-muted">Tickets assigned or reported by you will show up here.</p>
+              {onlyDefaultStatus ? (
+                <>
+                  <p className="text-sm font-medium text-fg-soft">No open tickets {filter === "assigned" ? "assigned to you" : "reported by you"}.</p>
+                  <p className="mt-1 text-xs text-muted">Showing Open tickets by default.</p>
+                  <button className="btn btn-secondary btn-sm mt-3" onClick={() => setListFilter("tstatus", "ALL")}>
+                    Show all statuses
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-medium text-fg-soft">No tickets match these filters.</p>
+                  <p className="mt-1 text-xs text-muted">Try a different status, priority or date range.</p>
+                  <button className="btn btn-secondary btn-sm mt-3" onClick={resetTicketFilters}>
+                    Reset filters
+                  </button>
+                </>
+              )}
             </div>
           )}
           {tickets?.map((t) => <TicketRow key={t.id} ticket={t} showProject />)}
@@ -247,11 +357,13 @@ const PROJECT_COLORS = [
 const PROJECTS_PAGE_SIZE_OPTIONS = [10, 25, 50, 100]; 
 const DEFAULT_PROJECTS_PAGE_SIZE = 25;
 
-const PROJECT_TABS: { key: ProjectStatusFilter; label: string; countKey: keyof ProjectCounts }[] = [
+const PROJECT_TABS: { key: ProjectStatusFilter; label: string; countKey: keyof ProjectCounts; adminOnly?: boolean }[] = [
+  { key: "current", label: "Current", countKey: "current" },
   { key: undefined, label: "All", countKey: "all" },
   { key: "new", label: "New", countKey: "new" },
   { key: "active", label: "Active", countKey: "active" },
   { key: "closed", label: "Closed", countKey: "closed" },
+  { key: "archived", label: "Archived", countKey: "archived", adminOnly: true },
 ];
 
 function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boolean }) {
@@ -259,10 +371,13 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [editProject, setEditProject] = useState<Project | null>(null);
+  const [archiveProject, setArchiveProject] = useState<Project | null>(null);
+  const [restoreProject, setRestoreProject] = useState<Project | null>(null);
   const [delProject, setDelProject] = useState<Project | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PROJECTS_PAGE_SIZE);
-  const [tab, setTab] = useState<ProjectStatusFilter>(undefined); 
+  const [tab, setTab] = useState<ProjectStatusFilter>("current"); // default view: New + Active
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
 
@@ -270,6 +385,7 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
     return () => clearTimeout(t);
   }, [search]);
+
   useEffect(() => {
     setPage(1);
   }, [tab, pageSize, debouncedSearch]);
@@ -292,22 +408,20 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
 
   const create = useMutation({
     mutationFn: () => api.createProject(orgId, { name, description: description || undefined }),
-    onSuccess: () => {
+    meta: { errorTitle: "Couldn't create the project" },
+    onSuccess: (p) => {
+      toast.success(`Project ${q(p.name)} has been created.`);
       setName("");
       setDescription("");
       setShowForm(false);
-      setTab(undefined);
+      setTab("current");
       setSearch("");
       qc.invalidateQueries({ queryKey: ["projects", orgId] });
     },
   });
-  const del = useMutation({
-    mutationFn: (projectId: string) => api.deleteProject(orgId, projectId),
-    onSuccess: () => {
-      setDelProject(null);
-      qc.invalidateQueries({ queryKey: ["projects", orgId] });
-    },
-  });
+  function changed() {
+    qc.invalidateQueries({ queryKey: ["projects", orgId] });
+  }
   useEffect(() => {
     if (paged && paged.items.length === 0 && page > 1) setPage(page - 1);
   }, [paged, page]);
@@ -326,7 +440,7 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
       {/* Status tabs (left) + search (right), same row */}
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div className="inline-flex items-center gap-1 rounded-full border border-card-border bg-white p-1">
-          {PROJECT_TABS.map((t) => {
+          {PROJECT_TABS.filter((t) => !t.adminOnly || canManage).map((t) => {
             const active = t.key === tab;
             const count = counts?.[t.countKey];
             return (
@@ -380,30 +494,53 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
                 ? `No projects match "${debouncedSearch}".`
                 : tab === undefined
                   ? `No projects yet${canManage ? " — create one to get started." : "."}`
-                  : `No ${tab} projects right now.`}
+                  : tab === "current"
+                    ? `No new or active projects right now.${canManage ? " Create one, or check the All tab." : ""}`
+                    : tab === "archived"
+                      ? "No archived projects."
+                      : `No ${tab} projects right now.`}
             </p>
           </div>
         )}
         {projects?.map((p, i) => {
           const c = PROJECT_COLORS[i % PROJECT_COLORS.length];
           return (
-            <div key={p.id} className="group relative overflow-hidden rounded-2xl border bg-white transition-all duration-300 hover:-translate-y-0.5 hover:shadow-elevated" style={{ borderColor: c.border }}>
-              <div className="h-1" style={{ background: c.icon }} />
+            <div key={p.id} data-testid="project-card" className={`group relative hover:z-30 focus-within:z-30 rounded-2xl border bg-white transition-all duration-300 hover:-translate-y-0.5 hover:shadow-elevated ${p.archivedAt ? "opacity-80" : ""}`} style={{ borderColor: c.border }}>
+              <div className="h-1 rounded-t-2xl" style={{ background: c.icon }} />
               <Link to={`/projects/${p.id}`} className="block p-5">
                 <div className="flex items-start gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl" style={{ background: c.bg }}><IconFolder size={18} style={{ color: c.icon }} /></div>
-                  <div className="min-w-0 flex-1">
+                  <div className={`min-w-0 flex-1 ${canManage ? "pr-8" : ""}`}>
                     <h3 className="text-[15px] font-bold tracking-tight text-fg transition-colors group-hover:text-primary" style={{ fontFamily: "var(--font-display)" }}>{p.name}</h3>
                     <p className="mt-0.5 text-sm text-fg-soft line-clamp-2">{p.description || "No description."}</p>
                   </div>
                 </div>
                 <div className="mt-3.5 flex items-center justify-between">
-                  <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-bold" style={{ background: c.bg, color: c.icon }}>{p.ticketCount} {p.ticketCount === 1 ? "Ticket" : "Tickets"}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-bold" style={{ background: c.bg, color: c.icon }}>{p.ticketCount} {p.ticketCount === 1 ? "Ticket" : "Tickets"}</span>
+                    {p.archivedAt && <span className="badge b-outline-muted">Archived</span>}
+                  </span>
                   <span className="flex items-center gap-1 text-xs font-semibold text-primary opacity-0 transition-all group-hover:opacity-100">Open <IconArrowRight size={13} /></span>
                 </div>
               </Link>
               {canManage && (
-                <button className="absolute right-3 top-4 flex h-7 w-7 items-center justify-center rounded-lg text-muted opacity-0 transition-all hover:bg-danger/10 hover:text-danger group-hover:opacity-100" onClick={() => setDelProject(p)} title="Delete project"><IconTrash size={14} /></button>
+                <div className="absolute right-2.5 top-4">
+                  <MenuButton
+                    label={`Actions for ${p.name}`}
+                    testId="project-menu"
+                    iconOnly
+                    align="right"
+                    width="w-48"
+                    variant="btn-secondary !px-1.5 !py-1"
+                    icon={<IconMoreHorizontal size={16} />}
+                    items={[
+                      { key: "edit-project", label: "Edit project", icon: <IconEdit size={15} />, hidden: !!p.archivedAt, onSelect: () => setEditProject(p) },
+                      { key: "archive-project", label: "Archive", icon: <IconArchive size={15} />, hidden: !!p.archivedAt, onSelect: () => setArchiveProject(p) },
+                      { key: "restore-project", label: "Restore from archive", icon: <IconArchive size={15} />, hidden: !p.archivedAt, onSelect: () => setRestoreProject(p) },
+                      { key: "delete-project", label: "Delete…", icon: <IconTrash size={15} />, danger: true, separator: true, onSelect: () => setDelProject(p) },
+                    ]}
+                  />
+                </div>
               )}
             </div>
           );
@@ -429,7 +566,10 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
         </div>
       )}
 
-      <ConfirmModal open={!!delProject} title="Delete project?" message={<>This permanently deletes <span className="font-medium">"{delProject?.name}"</span> and all of its tickets, comments, and attachments.</>} pending={del.isPending} onConfirm={() => del.mutate(delProject!.id)} onClose={() => setDelProject(null)} />
+      <EditProjectModal orgId={orgId} project={editProject} onClose={() => setEditProject(null)} onSaved={() => { setEditProject(null); changed(); }} />
+      <ArchiveProjectModal orgId={orgId} project={archiveProject} onClose={() => setArchiveProject(null)} onDone={() => { setArchiveProject(null); changed(); }} />
+      <RestoreProjectModal orgId={orgId} project={restoreProject} onClose={() => setRestoreProject(null)} onDone={() => { setRestoreProject(null); changed(); }} />
+      <DeleteProjectModal orgId={orgId} project={delProject} onClose={() => setDelProject(null)} onDone={() => { setDelProject(null); changed(); }} />
     </section>
   );
 }
