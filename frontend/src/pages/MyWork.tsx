@@ -21,7 +21,7 @@ const PAGE_SIZE = 15;
 
 const SECTION_TITLES: Record<WorkStatusFilter, string> = {
   all: "My Work",
-  pending: "Pending",
+  pending: "My Work",
   in_progress: "In Progress",
   completed: "Completed",
   overdue: "Overdue",
@@ -38,7 +38,9 @@ export default function MyWork() {
 
   const [dates, setDates] = useState<DateRangeValue>({ range: "all", from: "", to: "" });
   const { range, from: customFrom, to: customTo } = dates;
-  const [status, setStatus] = useState<WorkStatusFilter>("all");
+  // Default view: Open tickets only. Cards (and the API's `status`) change it; deselecting a card returns here.
+  const DEFAULT_STATUS: WorkStatusFilter = "pending";
+  const [status, setStatus] = useState<WorkStatusFilter>(DEFAULT_STATUS);
   const [priority, setPriority] = useState<TicketPriority | "">("");
   const [projectId, setProjectId] = useState("");
   const [search, setSearch] = useState("");
@@ -110,10 +112,10 @@ export default function MyWork() {
 
       {/* Summary cards — click one to filter the table below by it (click again to clear) */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4" role="group" aria-label="Filter tickets by summary">
-        <SummaryCard testId="card-assigned" label="Assigned" value={summary?.assigned} icon={<IconFolder size={18} />} color="#92613a" bg="#f3ebe0" selected={status === "all"} onClick={() => setStatus("all")} />
-        <SummaryCard testId="card-in-progress" label="In Progress" value={summary?.inProgress} icon={<IconClock size={18} />} color="#b8860b" bg="#fdf6e3" selected={status === "in_progress"} onClick={() => setStatus(status === "in_progress" ? "all" : "in_progress")} />
-        <SummaryCard testId="card-completed" label="Completed" value={summary?.completed} icon={<IconCheckCircle size={18} />} color="#5a8a3c" bg="#f0f6ec" selected={status === "completed"} onClick={() => setStatus(status === "completed" ? "all" : "completed")} />
-        <SummaryCard testId="card-overdue" label="Overdue" value={summary?.overdue} icon={<IconAlertTriangle size={18} />} color="#b93a2a" bg="#fdf0ee" selected={status === "overdue"} onClick={() => setStatus(status === "overdue" ? "all" : "overdue")} />
+        <SummaryCard testId="card-assigned" label="Assigned" value={summary?.open} icon={<IconFolder size={18} />} color="#92613a" bg="#f3ebe0" selected={status === DEFAULT_STATUS} onClick={() => setStatus(DEFAULT_STATUS)} />
+        <SummaryCard testId="card-in-progress" label="In Progress" value={summary?.inProgress} icon={<IconClock size={18} />} color="#b8860b" bg="#fdf6e3" selected={status === "in_progress"} onClick={() => setStatus(status === "in_progress" ? DEFAULT_STATUS : "in_progress")} />
+        <SummaryCard testId="card-completed" label="Completed" value={summary?.completed} icon={<IconCheckCircle size={18} />} color="#5a8a3c" bg="#f0f6ec" selected={status === "completed"} onClick={() => setStatus(status === "completed" ? DEFAULT_STATUS : "completed")} />
+        <SummaryCard testId="card-overdue" label="Overdue" value={summary?.overdue} icon={<IconAlertTriangle size={18} />} color="#b93a2a" bg="#fdf0ee" selected={status === "overdue"} onClick={() => setStatus(status === "overdue" ? DEFAULT_STATUS : "overdue")} />
       </div>
 
       {/* Filters: date range (same presets as Attendance) + priority + project + search */}
@@ -165,7 +167,8 @@ export default function MyWork() {
         )}
       </section>
 
-      {/* Completed Work table */}
+      {/* Completed Work table — only when Completed is selected; the default view is Open tickets only. */}
+      {status === "completed" && (
       <section>
         <h2 className="mb-3 text-lg font-bold tracking-tight text-fg" style={{ fontFamily: "var(--font-display)" }}>
           Completed Work
@@ -182,6 +185,7 @@ export default function MyWork() {
           />
         )}
       </section>
+      )}
     </div>
   );
 }
