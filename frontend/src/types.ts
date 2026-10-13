@@ -264,6 +264,8 @@ export interface CompletedTicket extends Ticket {
 
 export interface MyWorkSummary {
   assigned: number;
+  /** Open tickets in range — what the Assigned card shows. */
+  open: number;
   inProgress: number;
   completed: number;
   overdue: number;

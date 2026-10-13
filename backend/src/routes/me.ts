@@ -232,8 +232,10 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   };
 
   const completedScope = { orgId, userId: user.id, projectScope, searchWhere, window };
-  const [assignedCount, inProgressCount, overdueCount, completedCount] = await Promise.all([
+  const [assignedCount, openCount, inProgressCount, overdueCount, completedCount] = await Promise.all([
     prisma.ticket.count({ where: baseWhere as any }),
+    // Open tickets only — what the Assigned card shows by default.
+    prisma.ticket.count({ where: { ...baseWhere, status: "OPEN" } as any }),
     prisma.ticket.count({ where: { ...baseWhere, status: "IN_PROGRESS" } as any }),
     prisma.ticket.count({
       where: {
@@ -249,7 +251,8 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   ]);
 
   let statusWhere: Record<string, unknown> = {};
-  if (statusFilter === "pending") statusWhere = { status: "OPEN" };
+  // "open" is the clear name for what the UI calls Assigned by default; "pending" is its older alias.
+  if (statusFilter === "pending" || statusFilter === "open") statusWhere = { status: "OPEN" };
   else if (statusFilter === "in_progress") statusWhere = { status: "IN_PROGRESS" };
   else if (statusFilter === "completed") statusWhere = { status: "DONE" };
   else if (statusFilter === "overdue") statusWhere = { status: { not: "DONE" }, dueDate: { lt: overdueBefore } };
@@ -283,7 +286,8 @@ meRouter.get("/work", requireAuth, async (req, res) => {
 
   res.json({
     summary: {
-      assigned: assignedCount,
+      assigned: assignedCount, // every status in range (unchanged, kept for API compatibility)
+      open: openCount,
       inProgress: inProgressCount,
       completed: completedCount,
       overdue: overdueCount,
