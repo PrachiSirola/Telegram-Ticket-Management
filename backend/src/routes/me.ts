@@ -12,6 +12,8 @@ import {
 import { changePasswordWithHistory } from "../lib/credentialHistory.js";
 import { passwordChangedEmail, sendEmail } from "../lib/email.js";
 import { developerVisibleProjectsWhere } from "../lib/projectAccess.js";
+import { parseDueRange } from "../lib/dueRange.js";
+import { listAssigners, ticketIdsAssignedBy, withAssignmentInfo } from "../lib/assignedBy.js";
 import { dueDateFilter, isValidYmd, resolveWorkRange, ymdInZone, WORK_RANGES, type WorkRange } from "../lib/dateRanges.js";
 import {
   countCompletedInRange,
@@ -115,14 +117,11 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
 
   const filters = myTicketsFilterSchema.safeParse(req.query);
   if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
-  const { status, priority, dueFrom, dueTo } = filters.data;
-  if (dueFrom && dueTo && dueFrom > dueTo) {
-    return res.status(400).json({ error: "The 'from' date must be on or before the 'to' date." });
-  }
-  const dueRange = {
-    ...(dueFrom ? { gte: new Date(`${dueFrom}T00:00:00Z`) } : {}),
-    ...(dueTo ? { lt: new Date(Date.parse(`${dueTo}T00:00:00Z`) + 24 * 60 * 60 * 1000) } : {}),
-  };
+  const { status, priority } = filters.data;
+  // Due-date presets / custom range (or the older dueFrom/dueTo pair), in the org's timezone.
+  const orgRow = await prisma.organization.findUnique({ where: { id: orgId }, select: { timezone: true } });
+  const due = parseDueRange(req.query, orgRow?.timezone);
+  if (!due.ok) return res.status(400).json({ error: due.error });
 
   const where = {
     ...projectScope,
@@ -130,7 +129,7 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
     archivedAt: null,
     ...(status ? { status } : {}),
     ...(priority ? { priority } : {}),
-    ...(dueFrom || dueTo ? { dueDate: dueRange } : {}),
+    ...due.where,
   };
   const include = {
     assignee: userSelect,
@@ -194,10 +193,10 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   const q = req.query.q ? String(req.query.q).trim() : "";
 
   const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
-  const pageSize = Math.min(50, Math.max(1, parseInt(String(req.query.pageSize ?? "15"), 10) || 15));
+  const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize ?? "15"), 10) || 15));
   const completedPage = Math.max(1, parseInt(String(req.query.completedPage ?? "1"), 10) || 1);
   const completedPageSize = Math.min(
-    50,
+    100,
     Math.max(1, parseInt(String(req.query.completedPageSize ?? "15"), 10) || 15),
   );
 
@@ -211,7 +210,11 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   projectScope = { ...projectScope, archivedAt: null };
 
   const overdueBefore = new Date(`${ymdInZone(new Date(), timezone)}T00:00:00Z`);
+  // "Assigned By" filter: narrows every count, list and page below (it rides along with the search filter).
+  const assignedByParam = req.query.assignedBy ? String(req.query.assignedBy) : undefined;
+  const assignedByIds = assignedByParam ? await ticketIdsAssignedBy(user.id, assignedByParam) : undefined;
   const searchWhere = {
+    ...(assignedByIds ? { id: { in: assignedByIds } } : {}),
     ...(q
       ? {
           OR: [
@@ -283,6 +286,17 @@ meRouter.get("/work", requireAuth, async (req, res) => {
     page: completedPage,
     pageSize: completedPageSize,
   });
+  // Who assigned / reassigned each ticket on screen (from the activity log).
+  work.items = await withAssignmentInfo(work.items as any[]);
+  completedWork.items = await withAssignmentInfo(completedWork.items as any[]);
+  // Options for the Assigned By filter: everyone who assigned one of MY tickets here (follows the project / date scope, not the Assigned By choice itself).
+  const myTicketIds = (
+    await prisma.ticket.findMany({
+      where: { assigneeId: user.id, archivedAt: null, project: { orgId, ...projectScope } } as any,
+      select: { id: true },
+    })
+  ).map((t) => t.id);
+  const assigners = await listAssigners(myTicketIds);
 
   res.json({
     summary: {
@@ -294,6 +308,7 @@ meRouter.get("/work", requireAuth, async (req, res) => {
     },
     work,
     completedWork,
+    assigners,
     window: { range, fromDay: window.fromDay, toDay: window.toDay, timezone },
   });
 });

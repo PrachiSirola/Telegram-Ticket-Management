@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { isAdminOrAboveIn, useAuth } from "../auth";
+import { isAdminOrAboveIn, isInternalIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
+import { BulkProjectsBar } from "../components/BulkProjects";
+import { BulkStatusBar, RowCheck, useBulkSelect } from "../components/BulkStatus";
 import { MenuButton } from "../components/ActionMenu";
 import { q, toast } from "../lib/toast";
 import {
@@ -26,8 +28,9 @@ import {
   IconEdit,
   IconArchive,
 } from "../components/Icons";
-import type { Project, ProjectCounts, ProjectStatusFilter, TicketPriority, TicketStatus } from "../types";
+import type { Project, ProjectCounts, ProjectStatusFilter, TicketPriority, TicketStatus, WorkRange } from "../types";
 import { Dropdown } from "../components/Dropdown";
+import { DateRangeFilter, DATE_RANGE_URL_VALUES } from "../components/DateRangeFilter";
 
 function HeroIllustration() {
   const S = "#F2D9B8";          
@@ -120,7 +123,7 @@ function HeroIllustration() {
 
 export default function Dashboard() {
   const { me } = useAuth();
-  const { activeOrgId } = useOrg();
+  const { activeOrgId, activeOrg } = useOrg();
   const { filters, page, pageSize, setFilter: setListFilter, setFilters, setPage, setPageSize } = useListParams({
     pageKey: "tpage",
     sizeKey: "tsize",
@@ -128,6 +131,7 @@ export default function Dashboard() {
       tview: ["assigned", "reported"],
       tstatus: ["IN_PROGRESS", "DONE", "ALL"],
       tpriority: ["LOW", "MEDIUM", "HIGH", "URGENT"],
+      trange: DATE_RANGE_URL_VALUES,
     },
     dateKeys: ["tfrom", "tto"],
   });
@@ -135,12 +139,13 @@ export default function Dashboard() {
   const statusSel = filters.tstatus || "OPEN"; // what the dropdown shows
   const apiStatus = statusSel === "ALL" ? undefined : (statusSel as TicketStatus);
   const prioritySel = (filters.tpriority || undefined) as TicketPriority | undefined;
-  const dueFrom = filters.tfrom || undefined;
-  const dueTo = filters.tto || undefined;
-  const atDefault = statusSel === "OPEN" && !prioritySel && !dueFrom && !dueTo;
-  const onlyDefaultStatus = statusSel === "OPEN" && !prioritySel && !dueFrom && !dueTo;
+  const dueRange = (filters.trange || "all") as WorkRange;
+  const dueFrom = dueRange === "custom" ? filters.tfrom || undefined : undefined;
+  const dueTo = dueRange === "custom" ? filters.tto || undefined : undefined;
+  const atDefault = statusSel === "OPEN" && !prioritySel && dueRange === "all" && !filters.tfrom && !filters.tto;
+  const onlyDefaultStatus = atDefault;
   function resetTicketFilters() {
-    setFilters({ tstatus: "", tpriority: "", tfrom: "", tto: "" }); // keeps Assigned/Reported + page size
+    setFilters({ tstatus: "", tpriority: "", trange: "", tfrom: "", tto: "" }); // keeps Assigned/Reported + page size
   }
   const listTop = useRef<HTMLDivElement>(null);
   const {
@@ -151,14 +156,16 @@ export default function Dashboard() {
     isError,
     refetch,
   } = useQuery({
-    queryKey: ["myTickets", activeOrgId, filter, page, pageSize, apiStatus ?? "ALL", prioritySel ?? "", dueFrom ?? "", dueTo ?? ""],
+    queryKey: ["myTickets", activeOrgId, filter, page, pageSize, apiStatus ?? "ALL", prioritySel ?? "", dueRange, dueFrom ?? "", dueTo ?? ""],
     queryFn: () =>
-      api.myTicketsPaged(activeOrgId, filter, { page, pageSize, status: apiStatus, priority: prioritySel, dueFrom, dueTo }),
+      api.myTicketsPaged(activeOrgId, filter, { page, pageSize, status: apiStatus, priority: prioritySel, range: dueRange === "all" ? undefined : dueRange, from: dueFrom, to: dueTo }),
     enabled: !!activeOrgId,
     placeholderData: (prev, prevQuery) =>
       prevQuery?.queryKey[1] === activeOrgId && prevQuery?.queryKey[2] === filter ? prev : undefined,
   });
   const tickets = paged?.items;
+  const canBulk = isInternalIn(me, activeOrgId);
+  const bulk = useBulkSelect(canBulk ? tickets?.filter((t) => !t.archivedAt).map((t) => ({ id: t.id, title: t.title })) : undefined);
   useEffect(() => {
     if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
   }, [paged, isPlaceholderData, page, setPage]);
@@ -243,30 +250,11 @@ export default function Dashboard() {
               ...["LOW", "MEDIUM", "HIGH", "URGENT"].map((p) => ({ value: p, label: p })),
             ]}
           />
-          <label className="flex items-center gap-1.5 text-xs font-medium text-muted">
-            Due from
-            <input
-              type="date"
-              className="input"
-              style={{ width: 146, minHeight: 36, padding: "0 10px", fontSize: 13 }}
-              aria-label="Due from"
-              value={filters.tfrom ?? ""}
-              max={filters.tto || undefined}
-              onChange={(e) => setFilters({ tfrom: e.target.value, ...(e.target.value && filters.tto && e.target.value > filters.tto ? { tto: e.target.value } : {}) })}
-            />
-          </label>
-          <label className="flex items-center gap-1.5 text-xs font-medium text-muted">
-            to
-            <input
-              type="date"
-              className="input"
-              style={{ width: 146, minHeight: 36, padding: "0 10px", fontSize: 13 }}
-              aria-label="Due to"
-              value={filters.tto ?? ""}
-              min={filters.tfrom || undefined}
-              onChange={(e) => setFilters({ tto: e.target.value, ...(e.target.value && filters.tfrom && e.target.value < filters.tfrom ? { tfrom: e.target.value } : {}) })}
-            />
-          </label>
+          <DateRangeFilter
+            timeZone={activeOrg?.timezone}
+            value={{ range: dueRange, from: filters.tfrom ?? "", to: filters.tto ?? "" }}
+            onChange={(d) => setFilters({ trange: d.range === "all" ? "" : d.range, tfrom: d.range === "custom" ? d.from : "", tto: d.range === "custom" ? d.to : "" })}
+          />
           <button
             type="button"
             className="btn btn-secondary btn-sm ml-auto"
@@ -323,7 +311,15 @@ export default function Dashboard() {
               )}
             </div>
           )}
-          {tickets?.map((t) => <TicketRow key={t.id} ticket={t} showProject />)}
+          {canBulk && !isLoading && <BulkStatusBar select={bulk} />}
+          {tickets?.map((t) => (
+            <TicketRow
+              key={t.id}
+              ticket={t}
+              showProject
+              select={canBulk && bulk.active ? { checked: bulk.selected.has(t.id), onToggle: () => bulk.toggle(t.id), disabled: !!t.archivedAt } : undefined}
+            />
+          ))}
         </div>
         {paged && (
           <TablePagination
@@ -401,6 +397,12 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
     enabled: !!orgId,
   });
   const projects = paged?.items;
+  const bulk = useBulkSelect(canManage ? projects?.map((p) => ({ id: p.id, title: p.name })) : undefined);
+  // Switching tab / search changes which actions apply, so start a fresh selection.
+  useEffect(() => {
+    bulk.clear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, debouncedSearch]);
 
   function selectTab(next: ProjectStatusFilter) {
     setTab(next);
@@ -431,9 +433,14 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-lg font-bold tracking-tight text-fg" style={{ fontFamily: "var(--font-display)" }}>Projects</h2>
         {canManage && (
-          <button onClick={() => setShowForm((s) => !s)} className="btn btn-primary btn-sm">
-            <IconPlus size={15} />{showForm ? "Cancel" : "New Project"}
-          </button>
+          <div className="flex items-center gap-2">
+            {!bulk.active && (projects?.length ?? 0) > 0 && (
+              <button data-testid="bulk-select" onClick={bulk.start} className="btn btn-secondary btn-sm">Select</button>
+            )}
+            <button onClick={() => setShowForm((s) => !s)} className="btn btn-primary btn-sm">
+              <IconPlus size={15} />{showForm ? "Cancel" : "New Project"}
+            </button>
+          </div>
         )}
       </div>
 
@@ -485,6 +492,8 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
         </div>
       )}
 
+      {canManage && bulk.active && <BulkProjectsBar select={bulk} orgId={orgId} archivedTab={tab === "archived"} />}
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {!isLoading && projects?.length === 0 && (
           <div className="card px-8 py-12 text-center sm:col-span-2 lg:col-span-3">
@@ -505,9 +514,19 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
         {projects?.map((p, i) => {
           const c = PROJECT_COLORS[i % PROJECT_COLORS.length];
           return (
-            <div key={p.id} data-testid="project-card" className={`group relative hover:z-30 focus-within:z-30 rounded-2xl border bg-white transition-all duration-300 hover:-translate-y-0.5 hover:shadow-elevated ${p.archivedAt ? "opacity-80" : ""}`} style={{ borderColor: c.border }}>
+            <div key={p.id} data-testid="project-card" className={`group relative hover:z-30 focus-within:z-30 rounded-2xl border bg-white transition-all duration-300 hover:-translate-y-0.5 hover:shadow-elevated ${p.archivedAt ? "opacity-80" : ""} ${bulk.active && bulk.selected.has(p.id) ? "ring-2 ring-[#5C4033]" : ""}`} style={{ borderColor: c.border }}>
               <div className="h-1 rounded-t-2xl" style={{ background: c.icon }} />
-              <Link to={`/projects/${p.id}`} className="block p-5">
+              <Link
+                to={`/projects/${p.id}`}
+                className="block p-5"
+                onClick={(e) => {
+                  // In select mode a click picks the card instead of opening it.
+                  if (bulk.active) {
+                    e.preventDefault();
+                    bulk.toggle(p.id);
+                  }
+                }}
+              >
                 <div className="flex items-start gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl" style={{ background: c.bg }}><IconFolder size={18} style={{ color: c.icon }} /></div>
                   <div className={`min-w-0 flex-1 ${canManage ? "pr-8" : ""}`}>
@@ -523,7 +542,12 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
                   <span className="flex items-center gap-1 text-xs font-semibold text-primary opacity-0 transition-all group-hover:opacity-100">Open <IconArrowRight size={13} /></span>
                 </div>
               </Link>
-              {canManage && (
+              {canManage && bulk.active && (
+                <div className="absolute right-3.5 top-4">
+                  <RowCheck checked={bulk.selected.has(p.id)} onToggle={() => bulk.toggle(p.id)} label={`Select ${p.name}`} />
+                </div>
+              )}
+              {canManage && !bulk.active && (
                 <div className="absolute right-2.5 top-4">
                   <MenuButton
                     label={`Actions for ${p.name}`}

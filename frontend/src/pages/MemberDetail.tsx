@@ -9,6 +9,7 @@ import { Dropdown } from "../components/Dropdown";
 import { TablePagination } from "../components/TablePagination";
 import { useListParams } from "../lib/useListParams";
 import { TicketRow } from "../components/TicketRow";
+import { BulkStatusBar, useBulkSelect } from "../components/BulkStatus";
 import { backState } from "../components/BackLink";
 import { IconArrowLeft, IconFolder, IconTicket, IconClock, IconCheckCircle } from "../components/Icons";
 
@@ -60,6 +61,9 @@ export default function MemberDetail() {
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === userId ? prev : undefined),
   });
   const hasFilters = Object.keys(activeFilters).length > 0;
+  const bulk = useBulkSelect(
+    admin ? paged?.items.filter((t: any) => !t.archivedAt).map((t: any) => ({ id: t.id, title: t.title })) : undefined,
+  );
 
   // Server clamps an out-of-range page to the last page; mirror it into the URL.
   // Skip while `paged` is only placeholder data from the previous page —
@@ -208,8 +212,15 @@ export default function MemberDetail() {
                   )}
                 </div>
               )}
+              {admin && !ticketsLoading && <BulkStatusBar select={bulk} />}
               {paged?.items.map((t: any) => (
-                <TicketRow key={t.id} ticket={t} showProject linkState={here} />
+                <TicketRow
+                  key={t.id}
+                  ticket={t}
+                  showProject
+                  linkState={here}
+                  select={admin && bulk.active ? { checked: bulk.selected.has(t.id), onToggle: () => bulk.toggle(t.id), disabled: !!t.archivedAt } : undefined}
+                />
               ))}
             </div>
 

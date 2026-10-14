@@ -262,6 +262,85 @@ projectsRouter.get("/:projectId", requireAuth, requireOrgAccess, requireProjectA
   res.json(serialize(project));
 });
 
+// Bulk project actions. Admin / Super Admin only. Every project is checked on its own and
+// saved on its own, so one bad project never blocks the rest; the response says what
+// happened to each id (updated / skipped / failed with a reason). Only the ids sent are touched.
+//   archive — same as the single archive (idempotent: already archived → skipped)
+//   restore — same as the single restore (not archived → skipped)
+//   close   — marks every open / in-progress ticket in the project Done, which is what makes a
+//             project "Closed" (that state is derived from tickets, there is no stored flag).
+const bulkProjectsSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(100),
+  action: z.enum(["archive", "restore", "close"]),
+});
+
+projectsRouter.post("/bulk", requireAuth, requireOrgAccess, requireOrgRole("SUPER_ADMIN", "ADMIN"), async (req, res) => {
+  const parsed = bulkProjectsSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Select 1–100 projects and a valid action." });
+  const { action } = parsed.data;
+  const ids = [...new Set(parsed.data.ids)];
+  const { orgId } = req.params;
+  const actorId = req.user!.id;
+
+  const found = await prisma.project.findMany({ where: { id: { in: ids }, orgId }, select: { id: true, name: true, archivedAt: true } });
+  const byId = new Map(found.map((p) => [p.id, p]));
+
+  const updated: { id: string; name: string; tickets?: number }[] = [];
+  const skipped: { id: string; name: string; reason: string }[] = [];
+  const failed: { id: string; name: string | null; reason: string }[] = [];
+
+  for (const id of ids) {
+    const project = byId.get(id);
+    // Same answer for "missing" and "another organisation's" so ids can't be probed.
+    if (!project) {
+      failed.push({ id, name: null, reason: "Project not found" });
+      continue;
+    }
+    try {
+      if (action === "archive") {
+        if (project.archivedAt) { skipped.push({ id, name: project.name, reason: "Already archived" }); continue; }
+        await prisma.project.update({ where: { id }, data: { archivedAt: new Date() } });
+        updated.push({ id, name: project.name });
+      } else if (action === "restore") {
+        if (!project.archivedAt) { skipped.push({ id, name: project.name, reason: "Not archived" }); continue; }
+        await prisma.project.update({ where: { id }, data: { archivedAt: null } });
+        updated.push({ id, name: project.name });
+      } else {
+        if (project.archivedAt) { failed.push({ id, name: project.name, reason: "It's archived — restore it first" }); continue; }
+        const open = await prisma.ticket.findMany({
+          where: { projectId: id, archivedAt: null, status: { in: OPEN_STATUSES } },
+          select: { id: true, status: true },
+        });
+        if (open.length === 0) { skipped.push({ id, name: project.name, reason: "No open tickets" }); continue; }
+        await prisma.$transaction(async (tx) => {
+          // Re-check inside the transaction so a ticket changed meanwhile isn't logged twice.
+          const now = await tx.ticket.findMany({
+            where: { id: { in: open.map((t) => t.id) }, status: { in: OPEN_STATUSES } },
+            select: { id: true, status: true },
+          });
+          await tx.ticket.updateMany({ where: { id: { in: now.map((t) => t.id) } }, data: { status: "DONE" } });
+          await tx.ticketStatusHistory.createMany({
+            data: now.map((t) => ({ ticketId: t.id, fromStatus: t.status, toStatus: "DONE" as const, changedById: actorId })),
+          });
+          await tx.ticketActivity.createMany({
+            data: now.map((t) => ({
+              ticketId: t.id, actorId, type: "STATUS_CHANGED" as const, field: "status", fromValue: t.status, toValue: "DONE",
+              meta: { viaProjectClose: true },
+            })),
+          });
+          open.length = now.length;
+        });
+        updated.push({ id, name: project.name, tickets: open.length });
+      }
+    } catch (err) {
+      console.error("bulk project action failed", action, id, err);
+      failed.push({ id, name: project.name, reason: "Something went wrong saving this project" });
+    }
+  }
+
+  res.json({ action, updated, skipped, failed });
+});
+
 // Archive / restore. Admin / Super Admin only. Nothing is deleted or detached:
 // tickets, members and clients stay exactly as they are; the project just leaves the
 // default lists and becomes read-only until restored. Both are idempotent.

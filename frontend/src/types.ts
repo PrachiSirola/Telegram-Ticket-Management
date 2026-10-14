@@ -258,7 +258,19 @@ export interface Notification {
   ticket: { id: string; title: string; projectId: string; orgId: string; orgName: string };
 }
 
-export interface CompletedTicket extends Ticket {
+/** Who assigned a ticket, from its activity log (see backend lib/assignedBy.ts). */
+export interface AssignmentInfo {
+  /** The person behind the LATEST assignment or reassignment (the reporter when there is no history). */
+  assignedBy: { id: string; name: string; at: string | null } | null;
+  /** The person behind the ORIGINAL assignment — what the Assigned By filter matches. */
+  firstAssignedBy: { id: string; name: string } | null;
+  /** How many times the ticket has been assigned (2+ means it was reassigned). */
+  assignmentCount: number;
+}
+
+export interface WorkTicket extends Ticket, AssignmentInfo {}
+
+export interface CompletedTicket extends WorkTicket {
   completedAt: string;
 }
 
@@ -273,8 +285,24 @@ export interface MyWorkSummary {
 
 export interface MyWorkResponse {
   summary: MyWorkSummary;
-  work: Paged<Ticket>;
+  work: Paged<WorkTicket>;
   completedWork: Paged<CompletedTicket>;
+  /** Everyone who assigned one of my tickets — the options of the Assigned By filter. */
+  assigners: { id: string; name: string }[];
   /** The resolved window (org timezone) the server applied. */
   window?: { range: WorkRange; fromDay: string | null; toDay: string | null; timezone: string };
+}
+export interface BulkStatusResult {
+  status: TicketStatus;
+  updated: { id: string; title: string }[];
+  skipped: { id: string; title: string; reason: string }[];
+  failed: { id: string; title: string | null; reason: string }[];
+}
+
+export type BulkProjectAction = "archive" | "restore" | "close";
+export interface BulkProjectsResult {
+  action: BulkProjectAction;
+  updated: { id: string; name: string; tickets?: number }[];
+  skipped: { id: string; name: string; reason: string }[];
+  failed: { id: string; name: string | null; reason: string }[];
 }

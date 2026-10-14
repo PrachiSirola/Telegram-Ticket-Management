@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { matchWords } from "../lib/search";
+import { Popover } from "./Popover";
 
 export interface DropdownOption {
   value: string;
@@ -35,6 +36,8 @@ export function Dropdown({
   size = "md",
   align = "left",
   disabled = false,
+  up = false,
+  ariaLabel,
   searchable = false,
   searchPlaceholder = "Search…",
 }: {
@@ -46,6 +49,9 @@ export function Dropdown({
   size?: "sm" | "md";
   align?: "left" | "right";
   disabled?: boolean;
+  /** Open the menu above the trigger (for controls at the bottom of the page). */
+  up?: boolean;
+  ariaLabel?: string;
   /** Adds a search box at the top of the menu, filtering options by
    *  word-prefix match (see lib/search.ts) instead of showing the full
    *  list. Off by default — only opt in where explicitly wanted (e.g. the
@@ -57,6 +63,8 @@ export function Dropdown({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const selected = options.find((o) => o.value === value && o.value !== "");
 
@@ -66,7 +74,9 @@ export function Dropdown({
   useEffect(() => {
     if (!open) return;
     function onDoc(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (ref.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setOpen(false);
@@ -92,8 +102,12 @@ export function Dropdown({
   return (
     <div ref={ref} className={`relative ${className}`}>
       <button
+        ref={btnRef}
         type="button"
         disabled={disabled}
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
         className={`dd-trigger ${size === "sm" ? "sm" : ""} ${open ? "open" : ""}`}
       >
@@ -102,10 +116,7 @@ export function Dropdown({
         </span>
         <ChevronIcon className="dd-chevron" />
       </button>
-      {open && (
-        <div
-          className={`dd-menu absolute z-30 mt-1 min-w-full ${align === "right" ? "right-0" : "left-0"}`}
-        >
+      <Popover open={open} anchorRef={btnRef} popRef={popRef} align={align} preferUp={up} matchAnchorWidth role="listbox">
           {searchable && (
             <div className="border-b border-line p-2">
               <input
@@ -116,7 +127,10 @@ export function Dropdown({
                 placeholder={searchPlaceholder}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  e.stopPropagation(); // typing must not trigger page shortcuts…
+                  if (e.key === "Escape") setOpen(false); // …but Escape still closes the menu
+                }}
               />
             </div>
           )}
@@ -138,8 +152,7 @@ export function Dropdown({
               </button>
             ))
           )}
-        </div>
-      )}
+      </Popover>
     </div>
   );
 }
@@ -165,12 +178,16 @@ export function MultiDropdown({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
   const selected = options.filter((o) => values.includes(o.value));
 
   useEffect(() => {
     if (!open) return;
     function onDoc(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (ref.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setOpen(false);
@@ -201,6 +218,7 @@ export function MultiDropdown({
   return (
     <div ref={ref} className={`relative ${className}`}>
       <button
+        ref={btnRef}
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
@@ -211,10 +229,7 @@ export function MultiDropdown({
         </span>
         <ChevronIcon className="dd-chevron" />
       </button>
-      {open && (
-        <div
-          className={`dd-menu absolute z-30 mt-1 min-w-full ${align === "right" ? "right-0" : "left-0"}`}
-        >
+      <Popover open={open} anchorRef={btnRef} popRef={popRef} align={align} matchAnchorWidth role="listbox">
           {options.map((o) => {
             const checked = values.includes(o.value);
             return (
@@ -234,8 +249,7 @@ export function MultiDropdown({
               </button>
             );
           })}
-        </div>
-      )}
+      </Popover>
     </div>
   );
 }

@@ -25,6 +25,9 @@ import type {
   TicketPriority,
   TeamMember,
   TicketStatus,
+  BulkStatusResult,
+  BulkProjectAction,
+  BulkProjectsResult,
   TicketType,
   UserLite,
   WorkRange,
@@ -167,6 +170,8 @@ export const api = {
     http.patch<Project>(`/orgs/${orgId}/projects/${projectId}`, data).then((r) => r.data),
   project: (orgId: string, projectId: string) =>
     http.get<Project>(`/orgs/${orgId}/projects/${projectId}`).then((r) => r.data),
+  bulkProjects: (orgId: string, ids: string[], action: BulkProjectAction) =>
+    http.post<BulkProjectsResult>(`/orgs/${orgId}/projects/bulk`, { ids, action }).then((r) => r.data),
   archiveProject: (orgId: string, projectId: string) =>
     http.post<Project>(`/orgs/${orgId}/projects/${projectId}/archive`).then((r) => r.data),
   restoreProject: (orgId: string, projectId: string) =>
@@ -212,8 +217,10 @@ export const api = {
       status?: string;
       priority?: string;
       type?: string;
-      /** yyyy-mm-dd: only tickets due on that calendar day. */
-      dueDate?: string;
+      /** Due-date preset (omit for All Time); `from`/`to` (yyyy-mm-dd) apply when range = "custom". */
+      range?: string;
+      from?: string;
+      to?: string;
       page: number;
       pageSize: number;
     },
@@ -249,6 +256,8 @@ export const api = {
       assigneeId: string | null;
     }>,
   ) => http.patch<Ticket>(`/tickets/${id}`, data).then((r) => r.data),
+  bulkUpdateStatus: (ids: string[], status: TicketStatus) =>
+    http.post<BulkStatusResult>(`/tickets/bulk-status`, { ids, status }).then((r) => r.data),
   selfAssign: (id: string) =>
     http.post<Ticket>(`/tickets/${id}/self-assign`).then((r) => r.data),
   deleteTicket: (id: string) => http.delete(`/tickets/${id}`).then((r) => r.data),
@@ -338,9 +347,10 @@ export const api = {
       /** Omit for every status. */
       status?: TicketStatus;
       priority?: TicketPriority;
-      /** Inclusive due-date range, yyyy-mm-dd. */
-      dueFrom?: string;
-      dueTo?: string;
+      /** Due-date preset (omit for All Time); `from`/`to` (yyyy-mm-dd) apply when range = "custom". */
+      range?: string;
+      from?: string;
+      to?: string;
     },
   ) =>
     http
@@ -355,6 +365,8 @@ export const api = {
       status?: WorkStatusFilter;
       priority?: TicketPriority;
       projectId?: string;
+      /** User id of the "Assigned By" person. */
+      assignedBy?: string;
       q?: string;
       page: number;
       pageSize: number;

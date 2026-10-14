@@ -51,7 +51,13 @@ export function describe(a: ActivityItem): { icon: ReactNode; text: ReactNode } 
       return {
         icon: <IconUser size={13} />,
         text: a.to ? (
-          (a.meta as any)?.self ? <>assigned this ticket to themselves</> : <>assigned this ticket to <Q>{a.to}</Q>{a.from ? <> (was {a.from})</> : null}</>
+          (a.meta as any)?.self ? (
+            a.from ? <>took over this ticket from <Q>{a.from}</Q></> : <>assigned this ticket to themselves</>
+          ) : a.from ? (
+            <>reassigned this ticket from <Q>{a.from}</Q> to <Q>{a.to}</Q></>
+          ) : (
+            <>assigned this ticket to <Q>{a.to}</Q></>
+          )
         ) : (
           <>unassigned this ticket{a.from ? <> (was {a.from})</> : null}</>
         ),

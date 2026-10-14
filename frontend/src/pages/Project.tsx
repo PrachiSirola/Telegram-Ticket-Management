@@ -8,7 +8,10 @@ import { api } from "../lib/api";
 import { isAdminOrAboveIn, isInternalIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
+import { BulkStatusBar, useBulkSelect } from "../components/BulkStatus";
 import { Dropdown } from "../components/Dropdown";
+import { DatePicker } from "../components/DatePicker";
+import { DateRangeFilter, DATE_RANGE_URL_VALUES } from "../components/DateRangeFilter";
 import { TablePagination } from "../components/TablePagination";
 import { useListParams } from "../lib/useListParams";
 import { Modal } from "../components/Modal";
@@ -23,8 +26,8 @@ import {
   type MentionMember,
 } from "../components/MentionTextarea";
 import { matchWords } from "../lib/search";
-import type { Member, TeamMember, TicketPriority, TicketType } from "../types";
-import { todayInTimeZone, todayStr } from "../lib/dateUtils";
+import type { Member, TeamMember, TicketPriority, TicketType, WorkRange } from "../types";
+import { todayStr } from "../lib/dateUtils";
 
 const STATUS_OPTS = ["OPEN", "IN_PROGRESS", "DONE"];
 const PRIORITY_OPTS = ["LOW", "MEDIUM", "HIGH", "URGENT"];
@@ -42,8 +45,8 @@ export default function Project() {
   // so they survive refresh / back / shared links. Changing a filter or the
   // page size resets to page 1 (page size itself is kept).
   const { filters, page, pageSize, setFilter, setFilters, setPage, setPageSize, clearFilters } = useListParams({
-    filters: { status: STATUS_OPTS, priority: PRIORITY_OPTS, type: TYPE_OPTS, archived: ARCHIVED_OPTS },
-    dateKeys: ["dueDate"],
+    filters: { status: STATUS_OPTS, priority: PRIORITY_OPTS, type: TYPE_OPTS, archived: ARCHIVED_OPTS, range: DATE_RANGE_URL_VALUES },
+    dateKeys: ["from", "to"],
   });
   const listTop = useRef<HTMLDivElement>(null);
   // The project whose default view has been settled (see the effect below).
@@ -90,6 +93,9 @@ export default function Project() {
   });
   const tickets = paged?.items;
   const hasFilters = Object.keys(activeFilters).length > 0;
+  // Bulk status: internal team only, never on an archived project; archived tickets can't be selected.
+  const canBulk = isInternalIn(me, activeOrgId) && !projectArchived;
+  const bulk = useBulkSelect(canBulk ? tickets?.filter((t) => !t.archivedAt).map((t) => ({ id: t.id, title: t.title })) : undefined);
 
   // Default view: opening a project (with no filters in the URL) shows the
   // Open tickets due TODAY, where "today" is the date in the organisation's
@@ -98,7 +104,7 @@ export default function Project() {
   useEffect(() => {
     if (!projectId || !activeOrg || defaultsFor === projectId) return;
     if (!hasFilters && page === 1) {
-      setFilters({ status: "OPEN", dueDate: todayInTimeZone(activeOrg.timezone) });
+      setFilters({ status: "OPEN", range: "today" });
     }
     setDefaultsFor(projectId);
   }, [projectId, activeOrg, defaultsFor, hasFilters, page, setFilters]);
@@ -261,26 +267,11 @@ export default function Project() {
               options={[{ value: "", label: `All ${key}` }, ...opts.map(opt)]}
             />
           ))}
-          <div className="flex items-center gap-1.5">
-            <input
-              type="date"
-              className="input"
-              style={{ width: 150, minHeight: 36, padding: "0 12px", fontSize: 13 }}
-              aria-label="Due date"
-              title="Show tickets due on this date"
-              value={filters.dueDate ?? ""}
-              onChange={(e) => setFilter("dueDate", e.target.value)}
-            />
-            {filters.dueDate && (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => setFilter("dueDate", "")}
-              >
-                Clear date
-              </button>
-            )}
-          </div>
+          <DateRangeFilter
+            timeZone={activeOrg?.timezone}
+            value={{ range: (filters.range || "all") as WorkRange, from: filters.from ?? "", to: filters.to ?? "" }}
+            onChange={(d) => setFilters({ range: d.range === "all" ? "" : d.range, from: d.range === "custom" ? d.from : "", to: d.range === "custom" ? d.to : "" })}
+          />
           {isInternalIn(me, activeOrgId) && (
             <Dropdown
               className="w-44"
@@ -331,8 +322,13 @@ export default function Project() {
               )}
             </div>
           )}
+          {canBulk && !isLoading && <BulkStatusBar select={bulk} />}
           {tickets?.map((t) => (
-            <TicketRow key={t.id} ticket={t} />
+            <TicketRow
+              key={t.id}
+              ticket={t}
+              select={canBulk && bulk.active ? { checked: bulk.selected.has(t.id), onToggle: () => bulk.toggle(t.id), disabled: !!t.archivedAt } : undefined}
+            />
           ))}
         </div>
 
@@ -729,12 +725,15 @@ function NewTicketForm({
           onChange={(v) => setPriority(v as TicketPriority)}
           options={["LOW", "MEDIUM", "HIGH", "URGENT"].map(opt)}
         />
-        <input
-          type="date"
-          className="input w-auto"
+        <DatePicker
+          size="md"
+          className="w-44"
+          ariaLabel="Due date"
+          placeholder="Due date"
           value={dueDate}
           min={todayStr()}
-          onChange={(e) => setDueDate(e.target.value)}
+          today={todayStr()}
+          onChange={setDueDate}
         />
         {canAssign && (
           <Dropdown

@@ -14,6 +14,9 @@ export const DATE_RANGE_OPTIONS: { value: WorkRange; label: string }[] = [
   { value: "all", label: "All Time" },
 ];
 
+/** The presets that are stored in a page's URL (All Time is the absence of a range). */
+export const DATE_RANGE_URL_VALUES: readonly string[] = DATE_RANGE_OPTIONS.filter((o) => o.value !== "all").map((o) => o.value);
+
 export interface DateRangeValue {
   range: WorkRange;
   from: string;
@@ -48,10 +51,9 @@ export function DateRangeFilter({
             placeholder="Start date"
             value={value.from}
             today={today}
-            max={value.to || undefined}
             onChange={(from) => {
-              // A later start pushes an earlier end forward so the range never inverts.
-              const to = from && value.to && value.to < from ? from : value.to;
+              // An End date that is now before the Start is cleared, so the range never inverts.
+              const to = from && value.to && value.to < from ? "" : value.to;
               onChange({ range: "custom", from, to });
             }}
           />

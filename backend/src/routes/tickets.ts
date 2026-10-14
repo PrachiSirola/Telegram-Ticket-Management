@@ -4,10 +4,11 @@ import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireProjectAccess } from "../middleware/org.js";
 import { isAdminOrAbove, isInternal, orgRole } from "../lib/access.js";
-import { loadTicketForUser, rejectIfArchived } from "../lib/ticketAccess.js";
+import { loadTicketForUser, rejectIfArchived, userCanAccessTicket } from "../lib/ticketAccess.js";
 import { deleteTicketFiles } from "../lib/storage.js";
 import { listNames, notify } from "../lib/notify.js";
 import { logActivity } from "../lib/activity.js";
+import { parseDueRange } from "../lib/dueRange.js";
 import { followerRecipients } from "../lib/followers.js";
 import {
   paginate,
@@ -120,9 +121,11 @@ projectTicketsRouter.get(
   async (req, res) => {
     const filters = listFilterSchema.safeParse(req.query);
     if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
-    const { status, priority, type, assigneeId, q, archived, dueDate } = filters.data;
-    const dueStart = dueDate ? new Date(`${dueDate}T00:00:00Z`) : null;
-    const dueEnd = dueStart ? new Date(dueStart.getTime() + 24 * 60 * 60 * 1000) : null;
+    const { status, priority, type, assigneeId, q, archived } = filters.data;
+    // Due-date presets / custom range (or the older single `dueDate`), in the org's timezone.
+    const org = await prisma.organization.findUnique({ where: { id: req.params.orgId }, select: { timezone: true } });
+    const due = parseDueRange(req.query, org?.timezone);
+    if (!due.ok) return res.status(400).json({ error: due.error });
 
     // Customers never see archived tickets, whatever they ask for.
     const archivedMode = isInternal(req.user!, req.params.orgId) ? archived ?? "active" : "active";
@@ -134,7 +137,7 @@ projectTicketsRouter.get(
       ...(priority ? { priority } : {}),
       ...(type ? { type } : {}),
       ...(assigneeId ? { assigneeId } : {}),
-      ...(dueStart && dueEnd ? { dueDate: { gte: dueStart, lt: dueEnd } } : {}),
+      ...due.where,
       ...(q ? { title: { contains: q, mode: "insensitive" as const } } : {}),
     };
     // `id` makes the order total, so no ticket repeats or disappears between pages.
@@ -289,6 +292,93 @@ projectTicketsRouter.post(
 // By id: /tickets/:id
 // ---------------------------------------------------------------------------
 export const ticketsRouter = Router();
+
+// Bulk status update. Each ticket goes through the same rules as the single
+// PATCH (access, internal-only, archived) and is saved in its own transaction,
+// so one bad ticket never blocks the rest. The response lists what happened to
+// every id: updated, skipped (already in that status) or failed (with a reason).
+const bulkStatusSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(100),
+  status: z.enum(["OPEN", "IN_PROGRESS", "DONE"]),
+});
+
+ticketsRouter.post("/bulk-status", requireAuth, async (req, res) => {
+  const parsed = bulkStatusSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Select 1–100 tickets and a valid status." });
+  const { status } = parsed.data;
+  const ids = [...new Set(parsed.data.ids)];
+  const user = req.user!;
+
+  const updated: { id: string; title: string }[] = [];
+  const skipped: { id: string; title: string; reason: string }[] = [];
+  const failed: { id: string; title: string | null; reason: string }[] = [];
+
+  for (const id of ids) {
+    try {
+      const ticket = await prisma.ticket.findUnique({ where: { id }, include: { project: true } });
+      // Same answer for "missing" and "not yours" so ids can't be probed.
+      if (!ticket || !(await userCanAccessTicket(user, ticket))) {
+        failed.push({ id, title: null, reason: "Ticket not found" });
+        continue;
+      }
+      const orgId = ticket.project.orgId;
+      if (!isInternal(user, orgId)) {
+        failed.push({ id, title: ticket.title, reason: "You can't change the status of this ticket" });
+        continue;
+      }
+      if (ticket.project.archivedAt) {
+        failed.push({ id, title: ticket.title, reason: "Its project is archived" });
+        continue;
+      }
+      if (ticket.archivedAt) {
+        failed.push({ id, title: ticket.title, reason: "The ticket is archived" });
+        continue;
+      }
+      if (ticket.status === status) {
+        skipped.push({ id, title: ticket.title, reason: "Already in that status" });
+        continue;
+      }
+
+      const row = await prisma.$transaction(async (tx) => {
+        const r = await tx.ticket.update({ where: { id }, data: { status }, include: ticketInclude });
+        await tx.ticketStatusHistory.create({
+          data: { ticketId: id, fromStatus: ticket.status, toStatus: status, changedById: user.id },
+        });
+        await logActivity(tx, {
+          ticketId: id,
+          actorId: user.id,
+          type: "STATUS_CHANGED",
+          field: "status",
+          from: ticket.status,
+          to: status,
+        });
+        return r;
+      });
+      updated.push({ id, title: row.title });
+
+      // Notifications are best-effort: a failed email/Telegram must not undo or hide the save.
+      try {
+        const followers = await followerRecipients(id, orgId, ticket.projectId, { customerVisible: true });
+        await notify({
+          recipientIds: [ticket.reporterId, ticket.assigneeId ?? "", ...followers].filter(Boolean),
+          type: "STATUS_CHANGED",
+          ticket: row,
+          orgId,
+          actorId: user.id,
+          message: `${user.name} moved "${row.title}" to ${row.status.replace("_", " ")}.`,
+          telegram: true,
+        });
+      } catch (err) {
+        console.error("bulk-status notify failed", id, err);
+      }
+    } catch (err) {
+      console.error("bulk-status failed", id, err);
+      failed.push({ id, title: null, reason: "Something went wrong saving this ticket" });
+    }
+  }
+
+  res.json({ status, updated, skipped, failed });
+});
 
 ticketsRouter.get("/:id", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
