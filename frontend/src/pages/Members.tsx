@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { isAdminOrAboveIn, isOrgSA, useAuth } from "../auth";
 import { useOrg } from "../org";
-import { ConfirmModal } from "../components/ConfirmModal";
+import { TypeToConfirmModal } from "../components/TypeToConfirmModal";
 import { Dropdown, MultiDropdown } from "../components/Dropdown";
 import { Pagination } from "../components/Pagination";
 import { Avatar } from "../components/ui";
@@ -29,14 +29,12 @@ export default function Members() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-
-  // Debounce the search box so we're not firing a request on every keystroke.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
     return () => clearTimeout(t);
   }, [search]);
 
-  // A new search always lands back on page 1.
+
   useEffect(() => {
     setPage(1);
   }, [debouncedSearch]);
@@ -55,10 +53,19 @@ export default function Members() {
   });
 
   const [removing, setRemoving] = useState<OrgMember | null>(null);
+  const [disabling, setDisabling] = useState<OrgMember | null>(null);
+  const { data: removeImpact, isLoading: removeImpactLoading } = useQuery({
+    queryKey: ["member-impact", activeOrgId, removing?.userId],
+    queryFn: () => api.memberImpact(activeOrgId, removing!.userId),
+    enabled: !!removing && !!activeOrgId,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const apiMsg = (e: any, fb: string) => e?.response?.data?.error ?? fb;
   const [bulkOpen, setBulkOpen] = useState(false);
 
   const patchMember = useMutation({
-    mutationFn: ({ userId, data }: { userId: string; data: { role?: any; disabled?: boolean } }) =>
+    mutationFn: ({ userId, data }: { userId: string; data: { role?: any; disabled?: boolean; confirmName?: string } }) =>
       api.updateMember(activeOrgId, userId, data),
     meta: { errorTitle: "Couldn't update the member" },
     onMutate: ({ userId }) => {
@@ -72,11 +79,12 @@ export default function Members() {
       else if (typeof data.disabled === "boolean")
         toast.success(data.disabled ? `${name}'s account was disabled. They can no longer sign in.` : `${name}'s account was re-enabled.`);
       else toast.success(`${name} was updated.`);
+      setDisabling(null);
       qc.invalidateQueries({ queryKey: ["orgMembers", activeOrgId] });
     },
   });
   const removeMember = useMutation({
-    mutationFn: (userId: string) => api.removeMember(activeOrgId, userId),
+    mutationFn: (m: OrgMember) => api.removeMember(activeOrgId, m.userId, m.name),
     meta: { errorTitle: "Couldn't remove the member" },
     onSuccess: () => {
       toast.success(`${removing?.name ?? "The member"} was removed from ${activeOrg?.name ?? "the organisation"}.`);
@@ -102,8 +110,7 @@ export default function Members() {
     },
   });
 
-  // If removing the last member on a page empties it (and it's not page 1),
-  // step back a page rather than showing a stranded empty page.
+
   useEffect(() => {
     if (paged && paged.items.length === 0 && page > 1) setPage(page - 1);
   }, [paged, page]);
@@ -221,13 +228,15 @@ export default function Members() {
                   />
                   <button
                     className="btn btn-secondary btn-sm"
-                    onClick={() =>
-                      patchMember.mutate({ userId: m.userId, data: { disabled: !m.disabled } })
-                    }
+                    onClick={() => {
+                      patchMember.reset();
+                      if (m.disabled) patchMember.mutate({ userId: m.userId, data: { disabled: false } });
+                      else setDisabling(m);
+                    }}
                   >
                     {m.disabled ? "Enable" : "Disable"}
                   </button>
-                  <button className="btn btn-danger btn-sm" onClick={() => setRemoving(m)}>
+                  <button className="btn btn-danger btn-sm" onClick={() => { removeMember.reset(); setRemoving(m); }}>
                     Remove
                   </button>
                 </div>
@@ -255,7 +264,7 @@ export default function Members() {
       </section>
 
       <BulkInviteModal
-        key={activeOrgId /* a workspace switch starts a fresh form */}
+        key={activeOrgId}
         open={bulkOpen}
         onClose={() => setBulkOpen(false)}
         orgId={activeOrgId}
@@ -263,19 +272,53 @@ export default function Members() {
         canInviteAdmin={sa}
       />
 
-      <ConfirmModal
+      <TypeToConfirmModal
         open={!!removing}
         title="Remove member?"
-        message={
-          <>
-            <span className="font-medium">{removing?.name}</span> will lose access to this
-            organisation. Their tickets and comments stay for history.
-          </>
-        }
+        confirmLabel="Remove member"
+        pendingLabel="Removing…"
         pending={removeMember.isPending}
-        onConfirm={() => removeMember.mutate(removing!.userId)}
+        loading={removeImpactLoading}
+        error={removeMember.isError ? apiMsg(removeMember.error, "Couldn't remove the member.") : null}
+        testId="remove-member"
+        fields={[{ label: "Type the member's name to confirm", expected: removing?.name ?? "" }]}
+        onConfirm={() => removeMember.mutate(removing!)}
         onClose={() => setRemoving(null)}
-      />
+      >
+        <p>
+          <span className="font-medium text-fg">{removing?.name}</span> will lose access to{" "}
+          {activeOrg?.name ?? "this organisation"} and be removed from:
+        </p>
+        {removeImpact && (
+          <ul className="mt-2 list-disc pl-5" data-testid="remove-member-impact">
+            <li>{removeImpact.projects} {removeImpact.projects === 1 ? "project" : "projects"} they're attached to</li>
+            <li>
+              {removeImpact.openAssignedTickets} open {removeImpact.openAssignedTickets === 1 ? "ticket" : "tickets"}{" "}
+              currently assigned to them (these stay, but will have no active owner)
+            </li>
+          </ul>
+        )}
+        <p className="mt-2">Their tickets and comments stay for history. They'd need a new invitation to rejoin.</p>
+      </TypeToConfirmModal>
+
+      <TypeToConfirmModal
+        open={!!disabling}
+        title="Disable member?"
+        confirmLabel="Disable member"
+        pendingLabel="Disabling…"
+        pending={patchMember.isPending}
+        error={patchMember.isError && disabling ? apiMsg(patchMember.error, "Couldn't disable the member.") : null}
+        testId="disable-member"
+        fields={[{ label: "Type the member's name to confirm", expected: disabling?.name ?? "" }]}
+        onConfirm={() => patchMember.mutate({ userId: disabling!.userId, data: { disabled: true, confirmName: disabling!.name } })}
+        onClose={() => setDisabling(null)}
+      >
+        <p>
+          <span className="font-medium text-fg">{disabling?.name}</span> can no longer sign in
+          to {activeOrg?.name ?? "this organisation"}. Nothing is deleted — you can enable the account again at any
+          time.
+        </p>
+      </TypeToConfirmModal>
     </div>
   );
 }
@@ -296,8 +339,6 @@ function InviteForm({
   const [projectIds, setProjectIds] = useState<string[]>([]);
 
   const emailTrimmed = email.trim();
-  // Only flags once there's a domain to judge, so the error doesn't flash
-  // while the person is still typing the local part.
   const domainInvalid = emailTrimmed.includes("@") && !isAllowedEmailDomain(emailTrimmed);
 
   const { data: projects } = useQuery({

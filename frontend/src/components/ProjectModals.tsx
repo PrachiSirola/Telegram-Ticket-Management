@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Modal } from "./Modal";
 import { ConfirmModal } from "./ConfirmModal";
+import { TypeToConfirmModal } from "./TypeToConfirmModal";
 import { q, toast } from "../lib/toast";
 import type { Project } from "../types";
 
@@ -104,7 +105,7 @@ export function EditProjectModal({
   );
 }
 
-/** Archive confirmation (non-destructive, restorable). */
+/** Archive confirmation (restorable). The user must type the project's exact name. */
 export function ArchiveProjectModal({
   orgId,
   project,
@@ -119,7 +120,7 @@ export function ArchiveProjectModal({
   const [error, setError] = useState("");
   useEffect(() => setError(""), [project]);
   const archive = useMutation({
-    mutationFn: () => api.archiveProject(orgId, project!.id),
+    mutationFn: (name: string) => api.archiveProject(orgId, project!.id, name),
     meta: { errorTitle: "Couldn't archive the project" },
     onSuccess: (p) => {
       toast.success(`Project ${q(p.name)} has been archived. Restore it any time from the Archived tab.`);
@@ -128,25 +129,25 @@ export function ArchiveProjectModal({
     onError: (e) => setError(errText(e, "Couldn't archive the project.")),
   });
   return (
-    <ConfirmModal
+    <TypeToConfirmModal
       open={!!project}
       title="Archive project?"
-      confirmLabel="Archive"
+      confirmLabel="Archive project"
+      pendingLabel="Archiving…"
       variant="primary"
       pending={archive.isPending}
-      onConfirm={() => archive.mutate()}
+      error={error}
+      testId="archive-project"
+      fields={[{ label: "Type the project name to confirm", expected: project?.name ?? "" }]}
+      onConfirm={() => archive.mutate(project!.name)}
       onClose={onClose}
-      message={
-        <>
-          <p>
-            <span className="font-medium">“{project?.name}”</span> will be hidden from project lists, pickers and My Work,
-            and its tickets become read-only. Nothing is deleted.
-          </p>
-          <p className="mt-2 text-muted">You can find it under the Archived tab and restore it at any time.</p>
-          {error && <p className="mt-2 text-danger">{error}</p>}
-        </>
-      }
-    />
+    >
+      <p>
+        <span className="font-medium text-fg">“{project?.name}”</span> will be hidden from project lists, pickers and My
+        Work, and its tickets become read-only. Nothing is deleted.
+      </p>
+      <p className="mt-2">You can find it under the Archived tab and restore it at any time.</p>
+    </TypeToConfirmModal>
   );
 }
 

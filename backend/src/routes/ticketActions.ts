@@ -6,14 +6,12 @@ import { requireAuth } from "../middleware/auth.js";
 import { isAdminOrAbove, isClient, isInternal } from "../lib/access.js";
 import { loadTicketForUser, rejectIfArchived } from "../lib/ticketAccess.js";
 import { projectMemberPool } from "../lib/attachmentAccess.js";
+import { confirmed } from "../lib/confirmName.js";
 import { logActivity } from "../lib/activity.js";
 import { notify } from "../lib/notify.js";
 import { paginate, parsePageParams } from "../lib/pagination.js";
 
-/**
- * Collaboration endpoints on a ticket: activity timeline, followers,
- * duplicate, move, archive / restore. Mounted at /tickets/:id.
- */
+
 export const ticketActionsRouter = Router({ mergeParams: true });
 
 const ticketInclude = {
@@ -22,9 +20,6 @@ const ticketInclude = {
   project: { select: { id: true, name: true, orgId: true } },
 };
 
-// ---------------------------------------------------------------------------
-// Activity timeline (read-only: there is deliberately no way to edit or delete)
-// ---------------------------------------------------------------------------
 const ATTACHMENT_TYPES = [
   "ATTACHMENT_ADDED",
   "ATTACHMENT_DELETED",
@@ -41,9 +36,7 @@ ticketActionsRouter.get("/activity", requireAuth, async (req, res) => {
 
   const where: Prisma.TicketActivityWhereInput = {
     ticketId: ticket.id,
-    // Customers never see internal comments, private files, followers or archiving.
     ...(client ? { internalOnly: false } : {}),
-    // A row about a "Selected members" file would reveal its name to people who can't open it.
     ...(admin
       ? {}
       : {
@@ -54,7 +47,6 @@ ticketActionsRouter.get("/activity", requireAuth, async (req, res) => {
           },
         }),
   };
-  // Newest first; id breaks ties so pages are stable.
   const orderBy = [{ createdAt: "desc" as const }, { id: "desc" as const }];
   const paged = await paginate(
     parsePageParams({ page: 1, ...req.query }, 25),
@@ -76,7 +68,6 @@ ticketActionsRouter.get("/activity", requireAuth, async (req, res) => {
       field: a.field,
       from: a.fromValue,
       to: a.toValue,
-      // Raw metadata (ids, file sizes) is for the team only.
       meta: client ? undefined : a.meta,
       internalOnly: a.internalOnly,
       createdAt: a.createdAt,
@@ -85,9 +76,6 @@ ticketActionsRouter.get("/activity", requireAuth, async (req, res) => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Who can be picked (followers / selected members): the project's team
-// ---------------------------------------------------------------------------
 ticketActionsRouter.get("/members", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
@@ -97,9 +85,6 @@ ticketActionsRouter.get("/members", requireAuth, async (req, res) => {
   res.json(await projectMemberPool(ticket.project.orgId, ticket.projectId));
 });
 
-// ---------------------------------------------------------------------------
-// Followers (internal team only)
-// ---------------------------------------------------------------------------
 ticketActionsRouter.get("/followers", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
@@ -193,10 +178,6 @@ ticketActionsRouter.delete("/followers/:userId", requireAuth, async (req, res) =
   res.json({ ok: true });
 });
 
-// ---------------------------------------------------------------------------
-// Duplicate: a fresh OPEN copy in the same project. Files and comments are
-// deliberately not copied (private files must not leak into a new ticket).
-// ---------------------------------------------------------------------------
 ticketActionsRouter.post("/duplicate", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
@@ -244,9 +225,6 @@ ticketActionsRouter.post("/duplicate", requireAuth, async (req, res) => {
   res.status(201).json({ id: copy.id, projectId: copy.projectId, title: copy.title });
 });
 
-// ---------------------------------------------------------------------------
-// Move to another project of the same organisation (Admin / Super Admin)
-// ---------------------------------------------------------------------------
 ticketActionsRouter.post("/move", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
@@ -259,7 +237,7 @@ ticketActionsRouter.post("/move", requireAuth, async (req, res) => {
   if (parsed.data.projectId === ticket.projectId) {
     return res.status(400).json({ error: "The ticket is already in that project." });
   }
-  // Same organisation only — tickets never cross tenants.
+
   const target = await prisma.project.findFirst({
     where: { id: parsed.data.projectId, orgId },
     select: { id: true, name: true, archivedAt: true },
@@ -285,16 +263,15 @@ ticketActionsRouter.post("/move", requireAuth, async (req, res) => {
   res.json({ id: full!.id, projectId: full!.projectId, project: full!.project });
 });
 
-// ---------------------------------------------------------------------------
-// Archive / restore (Admin / Super Admin). Archiving hides the ticket from
-// lists and from customers; nothing is deleted and it can be restored.
-// ---------------------------------------------------------------------------
 ticketActionsRouter.post("/archive", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
   const user = req.user!;
   if (!isAdminOrAbove(user, ticket.project.orgId)) {
     return res.status(403).json({ error: "Only admins can archive tickets." });
+  }
+  if (!confirmed(req.body?.confirmTicketName, ticket.title)) {
+    return res.status(400).json({ error: "Type the ticket's name to confirm archiving it." });
   }
   if (ticket.archivedAt) return res.status(409).json({ error: "This ticket is already archived." });
   await prisma.$transaction(async (tx) => {

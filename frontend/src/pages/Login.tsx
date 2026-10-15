@@ -16,7 +16,9 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [pin, setPin] = useState("");
-  const [stage, setStage] = useState<"password" | "pin">("password");
+  const [stage, setStage] = useState<"password" | "pin" | "choose" | "authenticator">("password");
+  const [alternatives, setAlternatives] = useState<string[]>([]);
+  const [altCode, setAltCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [forgotBusy, setForgotBusy] = useState(false);
@@ -34,6 +36,7 @@ export default function Login() {
     try {
       const result = await api.login({ email, password });
       if (result.requires2fa) {
+        setAlternatives(Array.isArray(result.alternatives) ? result.alternatives : []);
         setStage("pin");
       } else {
         await refresh();
@@ -61,6 +64,27 @@ export default function Login() {
     }
   }
 
+  async function submitAlternative(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    setBusy(true);
+    try {
+      await api.verifyAuthenticator(altCode);
+      await refresh();
+      navigate("/");
+    } catch (e: any) {
+      setErr(failure(e, "That code didn't work."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function goTo(next: typeof stage) {
+    setStage(next);
+    setAltCode("");
+    setErr(null);
+  }
+
   async function sendForgotPin() {
     setForgotBusy(true);
     setErr(null);
@@ -78,6 +102,8 @@ export default function Login() {
   function backToPassword() {
     setStage("password");
     setPin("");
+    setAltCode("");
+    setAlternatives([]);
     setErr(null);
     setForgotSent(false);
   }
@@ -97,7 +123,74 @@ export default function Login() {
           <div className="eyebrow">Ticket Management</div>
         </div>
 
-        {stage === "password" ? (
+        {stage === "choose" ? (
+          <div className="card p-8">
+            <h1 className="text-2xl font-bold tracking-tight text-fg">Try another way</h1>
+            <p className="mb-6 mt-1 text-sm text-fg-soft">Choose how you'd like to verify it's you.</p>
+            <div className="grid gap-3">
+              <button type="button" className="btn btn-secondary btn-block" onClick={() => goTo("authenticator")}>
+                Use your authenticator app
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-block"
+                onClick={sendForgotPin}
+                disabled={forgotBusy}
+              >
+                {forgotBusy ? "Sending…" : "Reset your PIN by email"}
+              </button>
+              <button type="button" className="btn btn-secondary btn-block" onClick={() => goTo("pin")}>
+                Back to PIN
+              </button>
+            </div>
+            <Modal open={forgotSent} onClose={() => setForgotSent(false)} title="Check your email">
+              <p className="text-sm text-fg-soft">
+                If an account matches, we've sent a link to reset your 2FA PIN to your inbox. The link expires in 1 hour.
+              </p>
+              <button type="button" className="btn btn-primary btn-block mt-5" onClick={() => setForgotSent(false)}>
+                Got it
+              </button>
+            </Modal>
+            {err && <p className="mt-3 text-sm text-danger">{err}</p>}
+          </div>
+        ) : stage === "authenticator" ? (
+          <div className="card p-8">
+            <h1 className="text-2xl font-bold tracking-tight text-fg">Enter your authenticator code</h1>
+            <p className="mb-6 mt-1 text-sm text-fg-soft">
+              Open your authenticator app and enter the 6-digit code for Ticket Management.
+            </p>
+            <form onSubmit={submitAlternative} className="grid gap-4">
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-fg-soft">6-digit code</label>
+                <input
+                  className="input text-center tracking-[0.3em]"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  placeholder="••••••"
+                  value={altCode}
+                  onChange={(e) => setAltCode(e.target.value.replace(/\D/g, ""))}
+                  required
+                  autoFocus
+                />
+              </div>
+              <button
+                type="submit"
+                className="btn btn-primary btn-block"
+                disabled={busy || altCode.length !== 6}
+              >
+                {busy ? "Verifying…" : "Verify"}
+              </button>
+              <button type="button" className="btn btn-secondary btn-block" onClick={() => goTo("choose")} disabled={busy}>
+                Try another way
+              </button>
+              <button type="button" className="btn btn-secondary btn-block" onClick={() => goTo("pin")} disabled={busy}>
+                Back to PIN
+              </button>
+            </form>
+            {err && <p className="mt-3 text-sm text-danger">{err}</p>}
+          </div>
+        ) : stage === "password" ? (
           <div className="card p-8">
             <h1 className="text-2xl font-bold tracking-tight text-fg">Sign in</h1>
             <p className="mb-6 mt-1 text-sm text-fg-soft">
@@ -171,6 +264,13 @@ export default function Login() {
                 {forgotBusy ? "Sending…" : "Forgot PIN?"}
               </button>
               </div>
+              {alternatives.length > 0 && (
+                <div className="-mt-2 text-right">
+                  <button type="button" className="link text-sm" onClick={() => goTo("choose")}>
+                    Try another way
+                  </button>
+                </div>
+              )}
 
               <Modal open={forgotSent} onClose={() => setForgotSent(false)} title="Check your email">
               <p className="text-sm text-fg-soft">

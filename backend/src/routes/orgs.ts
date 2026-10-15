@@ -12,6 +12,9 @@ import {
 } from "../lib/orgCreation.js";
 import { orgCreationVerifyEmail, sendEmail } from "../lib/email.js";
 import { env } from "../env.js";
+import { confirmed } from "../lib/confirmName.js";
+
+const OPEN_STATUSES: Array<"OPEN" | "IN_PROGRESS"> = ["OPEN", "IN_PROGRESS"];
 import { paginate, parsePageParams, TICKET_TIEBREAK } from "../lib/pagination.js";
 
 export const orgsRouter = Router();
@@ -295,7 +298,7 @@ orgsRouter.get(
         : await prisma.project.findMany({
             where: {
               orgId,
-              archivedAt: null, // archived projects are hidden everywhere except the Archived tab
+              archivedAt: null, 
               OR: [
                 { developers: { some: { membershipId: membership.id } } },
                 { clients: { some: { membershipId: membership.id } } },
@@ -404,9 +407,16 @@ orgsRouter.patch(
     if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
     const target = await loadManagedMember(req, res);
     if (!target) return;
-    // Promoting someone TO Admin is Admin-management — SA only.
+
     if (parsed.data.role === "ADMIN" && !isOrgSA(req.user!, req.params.orgId)) {
       return res.status(403).json({ error: "Only the Super Admin can promote to Admin" });
+    }
+
+    if (parsed.data.disabled === true) {
+      const u = await prisma.user.findUniqueOrThrow({ where: { id: target.userId }, select: { name: true } });
+      if (!confirmed(req.body?.confirmName, u.name)) {
+        return res.status(400).json({ error: "Type the member's name to confirm disabling their account." });
+      }
     }
     const updated = await prisma.orgMembership.update({
       where: { id: target.id },
@@ -416,7 +426,27 @@ orgsRouter.patch(
   },
 );
 
-// Remove a member from the org entirely (project attachments cascade).
+
+orgsRouter.get(
+  "/:orgId/members/:userId/impact",
+  requireAuth,
+  requireOrgAccess,
+  requireOrgRole("SUPER_ADMIN", "ADMIN"),
+  async (req, res) => {
+    const target = await loadManagedMember(req, res);
+    if (!target) return;
+    const [developerProjects, clientProjects, openAssigned] = await Promise.all([
+      prisma.projectDeveloper.count({ where: { membershipId: target.id } }),
+      prisma.projectClient.count({ where: { membershipId: target.id } }),
+      prisma.ticket.count({
+        where: { assigneeId: target.userId, archivedAt: null, status: { in: OPEN_STATUSES }, project: { orgId: req.params.orgId } },
+      }),
+    ]);
+    res.json({ projects: developerProjects + clientProjects, openAssignedTickets: openAssigned });
+  },
+);
+
+
 orgsRouter.delete(
   "/:orgId/members/:userId",
   requireAuth,
@@ -425,6 +455,10 @@ orgsRouter.delete(
   async (req, res) => {
     const target = await loadManagedMember(req, res);
     if (!target) return;
+    const u = await prisma.user.findUniqueOrThrow({ where: { id: target.userId }, select: { name: true } });
+    if (!confirmed(req.body?.confirmName, u.name)) {
+      return res.status(400).json({ error: "Type the member's name to confirm removing them." });
+    }
     await prisma.orgMembership.delete({ where: { id: target.id } });
     res.json({ ok: true });
   },

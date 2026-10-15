@@ -22,6 +22,7 @@ import {
   workTicketInclude,
 } from "../lib/myWork.js";
 import { setPin, pinFormatError, PinReuseError } from "../lib/twoFactor.js";
+import { authenticatorRouter } from "./authenticator.js";
 import {
   paginate,
   parsePageParams,
@@ -118,7 +119,7 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
   const filters = myTicketsFilterSchema.safeParse(req.query);
   if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
   const { status, priority } = filters.data;
-  // Due-date presets / custom range (or the older dueFrom/dueTo pair), in the org's timezone.
+
   const orgRow = await prisma.organization.findUnique({ where: { id: orgId }, select: { timezone: true } });
   const due = parseDueRange(req.query, orgRow?.timezone);
   if (!due.ok) return res.status(400).json({ error: due.error });
@@ -210,7 +211,7 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   projectScope = { ...projectScope, archivedAt: null };
 
   const overdueBefore = new Date(`${ymdInZone(new Date(), timezone)}T00:00:00Z`);
-  // "Assigned By" filter: narrows every count, list and page below (it rides along with the search filter).
+
   const assignedByParam = req.query.assignedBy ? String(req.query.assignedBy) : undefined;
   const assignedByIds = assignedByParam ? await ticketIdsAssignedBy(user.id, assignedByParam) : undefined;
   const searchWhere = {
@@ -237,7 +238,7 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   const completedScope = { orgId, userId: user.id, projectScope, searchWhere, window };
   const [assignedCount, openCount, inProgressCount, overdueCount, completedCount] = await Promise.all([
     prisma.ticket.count({ where: baseWhere as any }),
-    // Open tickets only — what the Assigned card shows by default.
+
     prisma.ticket.count({ where: { ...baseWhere, status: "OPEN" } as any }),
     prisma.ticket.count({ where: { ...baseWhere, status: "IN_PROGRESS" } as any }),
     prisma.ticket.count({
@@ -254,7 +255,7 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   ]);
 
   let statusWhere: Record<string, unknown> = {};
-  // "open" is the clear name for what the UI calls Assigned by default; "pending" is its older alias.
+
   if (statusFilter === "pending" || statusFilter === "open") statusWhere = { status: "OPEN" };
   else if (statusFilter === "in_progress") statusWhere = { status: "IN_PROGRESS" };
   else if (statusFilter === "completed") statusWhere = { status: "DONE" };
@@ -286,10 +287,10 @@ meRouter.get("/work", requireAuth, async (req, res) => {
     page: completedPage,
     pageSize: completedPageSize,
   });
-  // Who assigned / reassigned each ticket on screen (from the activity log).
+
   work.items = await withAssignmentInfo(work.items as any[]);
   completedWork.items = await withAssignmentInfo(completedWork.items as any[]);
-  // Options for the Assigned By filter: everyone who assigned one of MY tickets here (follows the project / date scope, not the Assigned By choice itself).
+
   const myTicketIds = (
     await prisma.ticket.findMany({
       where: { assigneeId: user.id, archivedAt: null, project: { orgId, ...projectScope } } as any,
@@ -300,7 +301,7 @@ meRouter.get("/work", requireAuth, async (req, res) => {
 
   res.json({
     summary: {
-      assigned: assignedCount, // every status in range (unchanged, kept for API compatibility)
+      assigned: assignedCount, 
       open: openCount,
       inProgress: inProgressCount,
       completed: completedCount,
@@ -374,6 +375,9 @@ meRouter.get("/2fa", requireAuth, async (req, res) => {
   });
 });
 
+
+meRouter.use("/2fa/authenticator", authenticatorRouter);
+
 const setPinSchema = z.object({
   currentPassword: z.string().min(1),
   pin: z.string().min(1),
@@ -393,12 +397,12 @@ meRouter.post("/2fa/pin", requireAuth, async (req, res) => {
   const ok = await verifyPassword(currentPassword, current.passwordHash);
   if (!ok) return res.status(400).json({ error: "Current password is incorrect." });
 
-  // Same identity check used for the account password — no reusing your name/email as a PIN fragment.
+
   const identityErr = passwordContainsIdentityError(pin, current.email, current.name);
   if (identityErr) return res.status(400).json({ error: "PIN can't contain your name or email." });
 
   try {
-    // Rejects the current PIN and the previous one (3 most recent); atomic under a user lock.
+
     await setPin(current.id, pin);
   } catch (err) {
     if (err instanceof PinReuseError) return res.status(400).json({ error: err.message });

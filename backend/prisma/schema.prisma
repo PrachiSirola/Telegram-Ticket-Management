@@ -138,6 +138,15 @@ model User {
   pinHash          String?
   pinAttempts      Int              @default(0)
   pinLockedUntil   DateTime?
+  // Authenticator app (TOTP) — an extra way to verify when the passkey PIN isn't available.
+  // The secret is AES-256-GCM encrypted (see lib/authenticator.ts); a pending secret exists only during setup.
+  totpSecretEnc        String?
+  totpEnabledAt        DateTime?
+  totpPendingSecretEnc String?
+  totpPendingAt        DateTime?
+  totpLastStep         Int?      // last accepted 30s step: a code can't be replayed
+  totpAttempts         Int       @default(0)
+  totpLockedUntil      DateTime?
   ticketStatusChanges TicketStatusHistory[] @relation("TicketStatusChanges")
   attachmentAccess    AttachmentAccess[]
   ticketActivities    TicketActivity[]      @relation("ActivityActor")
