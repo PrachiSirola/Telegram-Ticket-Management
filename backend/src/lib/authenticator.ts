@@ -10,6 +10,20 @@ const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 const PENDING_TTL_MS = 15 * 60 * 1000;
 
+type AuthenticatorUser = {
+  id: string;
+  email: string;
+  pinHash: string | null;
+  totpEnabledAt: Date | null;
+  totpPendingSecretEnc: string | null;
+  totpPendingAt: Date | null;
+  totpSecretEnc: string | null;
+  totpLastStep: number | null;
+  totpAttempts: number;
+  totpLockedUntil: Date | null;
+  twoFactorEnabled: boolean;
+};
+
 export class AuthenticatorUnavailableError extends Error {
   constructor() {
     super("Authenticator 2FA isn't available on this server yet. Please contact your administrator.");

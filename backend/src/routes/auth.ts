@@ -85,7 +85,8 @@ authRouter.post("/login", authLimiter, async (req, res) => {
     if (user.twoFactorEnabled && user.twoFactorMethod === "PIN") {
       setTwoFactorPendingCookie(res, user.id);
 
-      const alternatives = user.totpEnabledAt && authenticatorConfigured() ? ["authenticator"] : [];
+      const hasTotp = "totpEnabledAt" in user && user.totpEnabledAt && authenticatorConfigured();
+      const alternatives = hasTotp ? ["authenticator"] : [];
       return res.json({ ok: true, requires2fa: true, method: "PIN", alternatives });
     }
 
