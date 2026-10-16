@@ -25,6 +25,9 @@ import type {
   TicketPriority,
   TeamMember,
   TicketStatus,
+  BulkStatusResult,
+  BulkProjectAction,
+  BulkProjectsResult,
   TicketType,
   UserLite,
   WorkRange,
@@ -99,9 +102,6 @@ export const api = {
   // --- Members ---
   orgMembers: (orgId: string) =>
     http.get<OrgMember[]>(`/orgs/${orgId}/members`).then((r) => r.data),
-  // Opt-in pagination, same convention as projectsPaged above. Used by the
-  // Members page's list; OrgSettings' ownership-transfer picker keeps using
-  // orgMembers() for the complete list.
   orgMembersPaged: (orgId: string, params: { page: number; pageSize: number; q?: string }) =>
     http
       .get<Paged<OrgMember>>(`/orgs/${orgId}/members`, {
@@ -111,10 +111,16 @@ export const api = {
   updateMember: (
     orgId: string,
     userId: string,
-    data: { role?: "ADMIN" | "DEVELOPER" | "CLIENT"; disabled?: boolean },
+    // Disabling a member needs their exact name (checked server-side too).
+    data: { role?: "ADMIN" | "DEVELOPER" | "CLIENT"; disabled?: boolean; confirmName?: string },
   ) => http.patch(`/orgs/${orgId}/members/${userId}`, data).then((r) => r.data),
-  removeMember: (orgId: string, userId: string) =>
-    http.delete(`/orgs/${orgId}/members/${userId}`).then((r) => r.data),
+  // The server requires the member's exact name as confirmation.
+  removeMember: (orgId: string, userId: string, confirmName: string) =>
+    http.delete(`/orgs/${orgId}/members/${userId}`, { data: { confirmName } }).then((r) => r.data),
+  memberImpact: (orgId: string, userId: string) =>
+    http
+      .get<{ projects: number; openAssignedTickets: number }>(`/orgs/${orgId}/members/${userId}/impact`)
+      .then((r) => r.data),
   // Member Detail page: profile + project access + assigned-ticket breakdown.
   memberDetail: (orgId: string, userId: string) =>
     http.get(`/orgs/${orgId}/members/${userId}/detail`).then((r) => r.data),
@@ -144,10 +150,7 @@ export const api = {
   // --- Projects ---
   projects: (orgId: string) =>
     http.get<Project[]>(`/orgs/${orgId}/projects`).then((r) => r.data),
-  // Opt-in pagination: same endpoint, but passing page/pageSize gets back a
-  // { items, total, page, pageSize } envelope instead of the plain array.
-  // Used by the Dashboard's paginated project grid; every other caller keeps
-  // using `projects()` above and is unaffected.
+
   projectsPaged: (
     orgId: string,
     params: { page: number; pageSize: number; status?: ProjectStatusFilter; q?: string },
@@ -157,8 +160,7 @@ export const api = {
         params: { page: params.page, pageSize: params.pageSize, status: params.status, q: params.q || undefined },
       })
       .then((r) => r.data),
-  // Live counts for the All/Active/Closed tab bar — derived from ticket
-  // state server-side, not stored, so they're always accurate.
+
   projectCounts: (orgId: string) =>
     http.get<ProjectCounts>(`/orgs/${orgId}/projects/counts`).then((r) => r.data),
   createProject: (orgId: string, data: { name: string; description?: string }) =>
@@ -167,8 +169,11 @@ export const api = {
     http.patch<Project>(`/orgs/${orgId}/projects/${projectId}`, data).then((r) => r.data),
   project: (orgId: string, projectId: string) =>
     http.get<Project>(`/orgs/${orgId}/projects/${projectId}`).then((r) => r.data),
-  archiveProject: (orgId: string, projectId: string) =>
-    http.post<Project>(`/orgs/${orgId}/projects/${projectId}/archive`).then((r) => r.data),
+  bulkProjects: (orgId: string, ids: string[], action: BulkProjectAction) =>
+    http.post<BulkProjectsResult>(`/orgs/${orgId}/projects/bulk`, { ids, action }).then((r) => r.data),
+  // The server requires the project's exact name to archive it.
+  archiveProject: (orgId: string, projectId: string, confirmName: string) =>
+    http.post<Project>(`/orgs/${orgId}/projects/${projectId}/archive`, { confirmName }).then((r) => r.data),
   restoreProject: (orgId: string, projectId: string) =>
     http.post<Project>(`/orgs/${orgId}/projects/${projectId}/restore`).then((r) => r.data),
   projectImpact: (orgId: string, projectId: string) =>
@@ -193,6 +198,18 @@ export const api = {
   toggle2fa: (data: { enabled: boolean; method?: "PIN" | "PASSKEY" }) =>
     http.post("/me/2fa/toggle", data).then((r) => r.data),
   verify2fa: (pin: string) => http.post("/auth/2fa/verify", { pin }).then((r) => r.data),
+  /** "Try another way" at the passkey step — a 6-digit authenticator code. */
+  verifyAuthenticator: (code: string) =>
+    http.post("/auth/2fa/authenticator", { code }).then((r) => r.data as { ok: true }),
+  // --- Authenticator app (TOTP) ---
+  authenticatorStatus: () =>
+    http.get("/me/2fa/authenticator").then((r) => r.data as AuthenticatorStatus),
+  authenticatorSetup: (currentPassword: string) =>
+    http.post("/me/2fa/authenticator/setup", { currentPassword }).then((r) => r.data as { secret: string; otpauthUrl: string }),
+  authenticatorEnable: (code: string) =>
+    http.post("/me/2fa/authenticator/enable", { code }).then((r) => r.data as { ok: true }),
+  authenticatorDisable: (currentPassword: string) =>
+    http.post("/me/2fa/authenticator/disable", { currentPassword }).then((r) => r.data),
 
   forgotPin: () => http.post("/auth/2fa/forgot-pin").then((r) => r.data),
   resetPin: (data: { token: string; pin: string; confirmPin: string }) =>
@@ -203,8 +220,7 @@ export const api = {
     http
       .get<Ticket[]>(`/orgs/${orgId}/projects/${projectId}/tickets`, { params })
       .then((r) => r.data),
-  // Server-side paginated + filtered (filters apply BEFORE paging, so `total`
-  // is the filtered count). Passing `page` opts in to the envelope.
+
   ticketsPaged: (
     orgId: string,
     projectId: string,
@@ -212,8 +228,9 @@ export const api = {
       status?: string;
       priority?: string;
       type?: string;
-      /** yyyy-mm-dd: only tickets due on that calendar day. */
-      dueDate?: string;
+      range?: string;
+      from?: string;
+      to?: string;
       page: number;
       pageSize: number;
     },
@@ -249,9 +266,17 @@ export const api = {
       assigneeId: string | null;
     }>,
   ) => http.patch<Ticket>(`/tickets/${id}`, data).then((r) => r.data),
+  bulkUpdateStatus: (ids: string[], status: TicketStatus) =>
+    http.post<BulkStatusResult>(`/tickets/bulk-status`, { ids, status }).then((r) => r.data),
   selfAssign: (id: string) =>
     http.post<Ticket>(`/tickets/${id}/self-assign`).then((r) => r.data),
-  deleteTicket: (id: string) => http.delete(`/tickets/${id}`).then((r) => r.data),
+
+  deleteTicket: (id: string, confirm: TicketConfirm) =>
+    http.delete(`/tickets/${id}`, { data: confirm }).then((r) => r.data),
+  ticketImpact: (id: string) =>
+    http
+      .get<{ comments: number; attachments: number; activity: number; followers: number }>(`/tickets/${id}/impact`)
+      .then((r) => r.data),
 
   // --- Comments ---
   comments: (ticketId: string) =>
@@ -268,7 +293,7 @@ export const api = {
   // --- Attachments ---
   attachments: (ticketId: string) =>
     http.get<Attachment[]>(`/tickets/${ticketId}/attachments`).then((r) => r.data),
-  /** Upload one or more files in a single request (all-or-nothing on the server). */
+
   uploadAttachments: (
     ticketId: string,
     files: File[],
@@ -292,7 +317,7 @@ export const api = {
       })
       .then((r) => r.data);
   },
-  /** "preview" = inline (images/PDF), "download" = forced attachment. Both enforce visibility server-side. */
+
   attachmentBlob: (attId: string, mode: "preview" | "download" = "preview") =>
     http.get(`/attachments/${attId}/${mode}`, { responseType: "blob" }).then((r) => r.data as Blob),
   deleteAttachment: (attId: string) =>
@@ -302,7 +327,7 @@ export const api = {
     data: { visibility: AttachmentVisibility; selectedUserIds?: string[] },
   ) => http.patch<Attachment>(`/attachments/${attId}`, data).then((r) => r.data),
 
-  // --- Collaboration: activity, followers, ticket actions ---
+
   ticketActivity: (ticketId: string, params: { page: number; pageSize: number }) =>
     http
       .get<TicketPage<ActivityItem>>(`/tickets/${ticketId}/activity`, { params })
@@ -321,8 +346,8 @@ export const api = {
       .then((r) => r.data),
   moveTicket: (ticketId: string, projectId: string) =>
     http.post(`/tickets/${ticketId}/move`, { projectId }).then((r) => r.data),
-  archiveTicket: (ticketId: string) =>
-    http.post(`/tickets/${ticketId}/archive`).then((r) => r.data),
+  archiveTicket: (ticketId: string, confirm: TicketConfirm) =>
+    http.post(`/tickets/${ticketId}/archive`, confirm).then((r) => r.data),
   restoreTicket: (ticketId: string) =>
     http.post(`/tickets/${ticketId}/restore`).then((r) => r.data),
 
@@ -335,12 +360,11 @@ export const api = {
     params: {
       page: number;
       pageSize: number;
-      /** Omit for every status. */
       status?: TicketStatus;
       priority?: TicketPriority;
-      /** Inclusive due-date range, yyyy-mm-dd. */
-      dueFrom?: string;
-      dueTo?: string;
+      range?: string;
+      from?: string;
+      to?: string;
     },
   ) =>
     http
@@ -355,6 +379,7 @@ export const api = {
       status?: WorkStatusFilter;
       priority?: TicketPriority;
       projectId?: string;
+      assignedBy?: string;
       q?: string;
       page: number;
       pageSize: number;
@@ -369,3 +394,13 @@ export const api = {
   markRead: (id: string) => http.post(`/me/notifications/${id}/read`).then((r) => r.data),
   markAllRead: () => http.post("/me/notifications/read-all").then((r) => r.data),
 };
+
+export type AuthenticatorStatus = {
+  configured: boolean;
+  enabled: boolean;
+  enabledAt: string | null;
+  hasPin: boolean;
+  passkeyLoginOn: boolean;
+};
+
+export type TicketConfirm = { confirmTicketName: string };

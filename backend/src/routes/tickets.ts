@@ -4,10 +4,12 @@ import { prisma } from "../prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireProjectAccess } from "../middleware/org.js";
 import { isAdminOrAbove, isInternal, orgRole } from "../lib/access.js";
-import { loadTicketForUser, rejectIfArchived } from "../lib/ticketAccess.js";
+import { loadTicketForUser, rejectIfArchived, userCanAccessTicket } from "../lib/ticketAccess.js";
+import { confirmed } from "../lib/confirmName.js";
 import { deleteTicketFiles } from "../lib/storage.js";
 import { listNames, notify } from "../lib/notify.js";
 import { logActivity } from "../lib/activity.js";
+import { parseDueRange } from "../lib/dueRange.js";
 import { followerRecipients } from "../lib/followers.js";
 import {
   paginate,
@@ -16,7 +18,6 @@ import {
   wantsPagination,
 } from "../lib/pagination.js";
 
-// Optional list filters. Empty string = "no filter" (what the UI sends for "All …").
 const emptyToUndef = (v: unknown) => (v === "" ? undefined : v);
 const listFilterSchema = z.object({
   status: z.preprocess(emptyToUndef, z.enum(["OPEN", "IN_PROGRESS", "DONE"]).optional()),
@@ -24,11 +25,8 @@ const listFilterSchema = z.object({
   type: z.preprocess(emptyToUndef, z.enum(["BUG", "FEATURE", "TASK"]).optional()),
   assigneeId: z.preprocess(emptyToUndef, z.string().optional()),
   q: z.preprocess(emptyToUndef, z.string().optional()),
-  // Archived tickets are hidden by default; the team can view them separately.
   archived: z.preprocess(emptyToUndef, z.enum(["active", "archived", "all"]).optional()),
-  // Tickets due on this calendar day (yyyy-mm-dd). Due dates are saved as a plain
-  // date (midnight UTC of the day that was picked), so the day is matched as that
-  // UTC calendar day — independent of the server's or viewer's timezone.
+
   dueDate: z.preprocess(
     emptyToUndef,
     z
@@ -39,7 +37,6 @@ const listFilterSchema = z.object({
   ),
 });
 
-/** What the signed-in user may do with a ticket — computed server-side, enforced again on each route. */
 export function ticketPermissions(
   user: Parameters<typeof isInternal>[0],
   orgId: string,
@@ -48,12 +45,9 @@ export function ticketPermissions(
   const internal = isInternal(user, orgId);
   const admin = isAdminOrAbove(user, orgId);
   const reporter = ticket.reporterId === user.id;
-  // A ticket of an archived project is read-only, exactly like an archived ticket.
   const projectArchived = Boolean(ticket.project?.archivedAt);
   const live = !ticket.archivedAt && !projectArchived;
   return {
-    // Details (title, description, type, due date): Admins / Super Admins only;
-    // the reporting customer may still fix their own ticket's text.
     edit: live && (admin || (reporter && !internal)),
     changeStatus: live && internal,
     changePriority: live && internal,
@@ -99,7 +93,6 @@ const ticketInclude = {
   project: { select: { id: true, name: true, orgId: true, archivedAt: true } },
 };
 
-/** Is userId an active internal (non-client) member of the org? */
 async function isAssignableMember(userId: string, orgId: string) {
   const m = await prisma.orgMembership.findUnique({
     where: { userId_orgId: { userId, orgId } },
@@ -107,9 +100,6 @@ async function isAssignableMember(userId: string, orgId: string) {
   return Boolean(m && !m.disabled && m.role !== "CLIENT");
 }
 
-// ---------------------------------------------------------------------------
-// Project-scoped: /orgs/:orgId/projects/:projectId/tickets
-// ---------------------------------------------------------------------------
 export const projectTicketsRouter = Router({ mergeParams: true });
 
 projectTicketsRouter.get(
@@ -120,11 +110,12 @@ projectTicketsRouter.get(
   async (req, res) => {
     const filters = listFilterSchema.safeParse(req.query);
     if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
-    const { status, priority, type, assigneeId, q, archived, dueDate } = filters.data;
-    const dueStart = dueDate ? new Date(`${dueDate}T00:00:00Z`) : null;
-    const dueEnd = dueStart ? new Date(dueStart.getTime() + 24 * 60 * 60 * 1000) : null;
+    const { status, priority, type, assigneeId, q, archived } = filters.data;
+    const org = await prisma.organization.findUnique({ where: { id: req.params.orgId }, select: { timezone: true } });
+    const due = parseDueRange(req.query, org?.timezone);
+    if (!due.ok) return res.status(400).json({ error: due.error });
 
-    // Customers never see archived tickets, whatever they ask for.
+
     const archivedMode = isInternal(req.user!, req.params.orgId) ? archived ?? "active" : "active";
     const where = {
       projectId: req.project!.id,
@@ -134,21 +125,19 @@ projectTicketsRouter.get(
       ...(priority ? { priority } : {}),
       ...(type ? { type } : {}),
       ...(assigneeId ? { assigneeId } : {}),
-      ...(dueStart && dueEnd ? { dueDate: { gte: dueStart, lt: dueEnd } } : {}),
+      ...due.where,
       ...(q ? { title: { contains: q, mode: "insensitive" as const } } : {}),
     };
-    // `id` makes the order total, so no ticket repeats or disappears between pages.
+
     const orderBy = [{ updatedAt: "desc" as const }, TICKET_TIEBREAK];
 
-    // Opt-in pagination (same convention as projects/members): without `page`
-    // the response is the plain array it has always been.
+
     if (!wantsPagination(req.query)) {
       const tickets = await prisma.ticket.findMany({ where, include: ticketInclude, orderBy });
       return res.json(tickets.map(serialize));
     }
 
-    // Filters, count and page slice all share the same `where`, so `total`
-    // is the FILTERED total and only one page of rows leaves the database.
+
     const paged = await paginate(
       parsePageParams(req.query),
       () => prisma.ticket.count({ where }),
@@ -186,7 +175,7 @@ projectTicketsRouter.post(
       return res.status(409).json({ error: "This project is archived. Restore it before adding tickets." });
     }
 
-    // Only SA/Admin may assign on creation; assignees are internal members.
+
     let assigneeId: string | null = null;
     if (data.assigneeId) {
       if (!isAdminOrAbove(user, orgId)) {
@@ -233,7 +222,7 @@ projectTicketsRouter.post(
       return created;
     });
 
-    // Announce to the org's Telegram chat (no in-app recipients here).
+
     await notify({
       recipientIds: [],
       type: "ASSIGNED",
@@ -260,8 +249,7 @@ projectTicketsRouter.post(
       });
     }
 
-    // Mentions in the description — notify() filters to actual org members
-    // (and, for clients, project attachment).
+
     if (data.mentions?.length) {
       const mentioned = await prisma.user.findMany({
         where: { id: { in: data.mentions } },
@@ -285,10 +273,91 @@ projectTicketsRouter.post(
   },
 );
 
-// ---------------------------------------------------------------------------
-// By id: /tickets/:id
-// ---------------------------------------------------------------------------
+
 export const ticketsRouter = Router();
+
+const bulkStatusSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(100),
+  status: z.enum(["OPEN", "IN_PROGRESS", "DONE"]),
+});
+
+ticketsRouter.post("/bulk-status", requireAuth, async (req, res) => {
+  const parsed = bulkStatusSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Select 1–100 tickets and a valid status." });
+  const { status } = parsed.data;
+  const ids = [...new Set(parsed.data.ids)];
+  const user = req.user!;
+
+  const updated: { id: string; title: string }[] = [];
+  const skipped: { id: string; title: string; reason: string }[] = [];
+  const failed: { id: string; title: string | null; reason: string }[] = [];
+
+  for (const id of ids) {
+    try {
+      const ticket = await prisma.ticket.findUnique({ where: { id }, include: { project: true } });
+
+      if (!ticket || !(await userCanAccessTicket(user, ticket))) {
+        failed.push({ id, title: null, reason: "Ticket not found" });
+        continue;
+      }
+      const orgId = ticket.project.orgId;
+      if (!isInternal(user, orgId)) {
+        failed.push({ id, title: ticket.title, reason: "You can't change the status of this ticket" });
+        continue;
+      }
+      if (ticket.project.archivedAt) {
+        failed.push({ id, title: ticket.title, reason: "Its project is archived" });
+        continue;
+      }
+      if (ticket.archivedAt) {
+        failed.push({ id, title: ticket.title, reason: "The ticket is archived" });
+        continue;
+      }
+      if (ticket.status === status) {
+        skipped.push({ id, title: ticket.title, reason: "Already in that status" });
+        continue;
+      }
+
+      const row = await prisma.$transaction(async (tx) => {
+        const r = await tx.ticket.update({ where: { id }, data: { status }, include: ticketInclude });
+        await tx.ticketStatusHistory.create({
+          data: { ticketId: id, fromStatus: ticket.status, toStatus: status, changedById: user.id },
+        });
+        await logActivity(tx, {
+          ticketId: id,
+          actorId: user.id,
+          type: "STATUS_CHANGED",
+          field: "status",
+          from: ticket.status,
+          to: status,
+        });
+        return r;
+      });
+      updated.push({ id, title: row.title });
+
+
+      try {
+        const followers = await followerRecipients(id, orgId, ticket.projectId, { customerVisible: true });
+        await notify({
+          recipientIds: [ticket.reporterId, ticket.assigneeId ?? "", ...followers].filter(Boolean),
+          type: "STATUS_CHANGED",
+          ticket: row,
+          orgId,
+          actorId: user.id,
+          message: `${user.name} moved "${row.title}" to ${row.status.replace("_", " ")}.`,
+          telegram: true,
+        });
+      } catch (err) {
+        console.error("bulk-status notify failed", id, err);
+      }
+    } catch (err) {
+      console.error("bulk-status failed", id, err);
+      failed.push({ id, title: null, reason: "Something went wrong saving this ticket" });
+    }
+  }
+
+  res.json({ status, updated, skipped, failed });
+});
 
 ticketsRouter.get("/:id", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
@@ -309,7 +378,6 @@ ticketsRouter.get("/:id", requireAuth, async (req, res) => {
     : false;
   res.json({
     ...serialize(full),
-    // Followers are an internal-team feature; customers are never told who follows.
     followerCount: internal ? await prisma.ticketFollower.count({ where: { ticketId: ticket.id } }) : undefined,
     following,
     can: ticketPermissions(user, orgId, ticket),
@@ -343,8 +411,7 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
 
   const data: Record<string, unknown> = {};
 
-  // Content fields: internal team always; the reporting client may edit
-  // title/description of their own ticket.
+
   if (body.title !== undefined) {
     if (!admin && !(isReporter && !internal)) return res.status(403).json({ error: "Only admins can edit ticket details" });
     data.title = body.title;
@@ -363,7 +430,7 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
     }
   }
 
-  // Status: internal team only.
+
   let statusChanged = false;
   if (body.status !== undefined) {
     if (!internal) return res.status(403).json({ error: "Cannot change status" });
@@ -371,7 +438,7 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
     data.status = body.status;
   }
 
-  // Assignee (arbitrary): SA/Admin only; assignees are internal members.
+
   let newAssignee: string | null | undefined;
   if (body.assigneeId !== undefined) {
     if (!admin) return res.status(403).json({ error: "Only admins can reassign" });
@@ -398,8 +465,6 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
       logActivity(tx, { ticketId: ticket.id, actorId: user.id, ...a });
 
     if (statusChanged) {
-      // Source of truth for "when was this completed" — see the model's doc
-      // comment in schema.prisma for why this exists separately from updatedAt.
       await tx.ticketStatusHistory.create({
         data: {
           ticketId: ticket.id,
@@ -467,28 +532,45 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
   res.json(serialize(updated));
 });
 
-// Delete: SA/Admin of the org, or the ticket's reporter. Comments, attachments
-// and notifications cascade in the DB; uploaded files are removed from disk.
-// Delete: SA/Admin of the org, or the ticket's reporter — except Developers,
-// who never get delete access even for tickets they reported themselves.
-// Comments, attachments and notifications cascade in the DB; uploaded files
-// are removed from disk.
-ticketsRouter.delete("/:id", requireAuth, async (req, res) => {
+async function loadDeletableTicket(req: any, res: any) {
   const ticket = await loadTicketForUser(req, res);
-  if (!ticket) return;
+  if (!ticket) return null;
   const user = req.user!;
   const admin = isAdminOrAbove(user, ticket.project.orgId);
   const isReporterAllowed =
     orgRole(user, ticket.project.orgId) !== "DEVELOPER" && ticket.reporterId === user.id;
   if (!admin && !isReporterAllowed) {
-    return res.status(403).json({ error: "Only the reporter or an admin can delete" });
+    res.status(403).json({ error: "Only the reporter or an admin can delete" });
+    return null;
+  }
+  return ticket;
+}
+
+
+ticketsRouter.get("/:id/impact", requireAuth, async (req, res) => {
+  const ticket = await loadDeletableTicket(req, res);
+  if (!ticket) return;
+  const [comments, attachments, activity, followers] = await Promise.all([
+    prisma.comment.count({ where: { ticketId: ticket.id } }),
+    prisma.attachment.count({ where: { ticketId: ticket.id } }),
+    prisma.ticketActivity.count({ where: { ticketId: ticket.id } }),
+    prisma.ticketFollower.count({ where: { ticketId: ticket.id } }),
+  ]);
+  res.json({ comments, attachments, activity, followers });
+});
+
+ticketsRouter.delete("/:id", requireAuth, async (req, res) => {
+  const ticket = await loadDeletableTicket(req, res);
+  if (!ticket) return;
+  if (!confirmed(req.body?.confirmTicketName, ticket.title)) {
+    return res.status(400).json({ error: "Type the ticket's name to confirm deleting it." });
   }
   await prisma.ticket.delete({ where: { id: ticket.id } });
   await deleteTicketFiles(ticket.id);
   res.json({ ok: true });
 });
 
-// Self-assign: internal team members only.
+
 ticketsRouter.post("/:id/self-assign", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;

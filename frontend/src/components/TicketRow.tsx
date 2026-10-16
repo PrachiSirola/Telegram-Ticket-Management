@@ -7,35 +7,38 @@ import {
   TypeBadge,
 } from "./ui";
 import { IconArrowRight } from "./Icons";
+import { RowCheck } from "./BulkStatus";
 
 export function TicketRow({
   ticket,
   showProject,
   linkState,
+  select,
 }: {
   ticket: Ticket;
   showProject?: boolean;
   /** Router state for the link (e.g. backState(...) so the ticket page can offer "Back"). */
   linkState?: unknown;
+  /** Bulk-select checkbox; omit for people who can't change status. */
+  select?: { checked: boolean; onToggle: () => void; disabled?: boolean };
 }) {
-  return (
+  const link = (
     <Link
       to={`/tickets/${ticket.id}`}
       state={linkState}
-      className="
+      className={`
         group
         flex
         items-center
         justify-between
         gap-5
-        border-b
-        border-card-border/60
+        ${select ? "flex-1 min-w-0" : "border-b border-card-border/60"}
         px-5
         py-4
         transition-all
         duration-200
         hover:bg-accent
-      "
+      `}
     >
       <div className="min-w-0 flex-1">
 
@@ -94,5 +97,17 @@ export function TicketRow({
         />
       </div>
     </Link>
+  );
+  if (!select) return link;
+  return (
+    <div
+      className={`flex items-stretch border-b border-card-border/60 ${select.checked ? "bg-accent/70" : ""}`}
+      data-testid="ticket-row"
+    >
+      <div className="flex items-center pl-5">
+        <RowCheck checked={select.checked} onToggle={select.onToggle} label={`Select ${ticket.title}`} disabled={select.disabled} />
+      </div>
+      {link}
+    </div>
   );
 }

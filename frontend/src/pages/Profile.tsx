@@ -6,6 +6,7 @@ import { Avatar } from "../components/ui";
 import { PasswordInput } from "../components/PasswordInput";
 import { IconLock } from "../components/Icons";
 import { TwoFactorCard } from "../components/TwoFactorCard";
+import { AuthenticatorCard } from "../components/AuthenticatorCard";
 import { PinCard } from "../components/PinCard";
 
 export default function Profile() {
@@ -127,8 +128,12 @@ export default function Profile() {
           </form>
         </div>
 
-        <TwoFactorCard />
-        <PinCard />
+        {/* Passkey column: Register Passkey, with the Enable/Disable control directly below it. */}
+        <div className="flex flex-col gap-6">
+          <PinCard />
+          <TwoFactorCard />
+        </div>
+        <AuthenticatorCard />
       </div>
     </div>
   );

@@ -5,7 +5,9 @@ import { api } from "../lib/api";
 import { humanize, q, toast } from "../lib/toast";
 import { MenuButton, type MenuItem } from "./ActionMenu";
 import { ConfirmModal } from "./ConfirmModal";
+import { TypeToConfirmModal } from "./TypeToConfirmModal";
 import { Dropdown } from "./Dropdown";
+import { DatePicker } from "./DatePicker";
 import { Modal } from "./Modal";
 import { Avatar } from "./ui";
 import {
@@ -280,8 +282,21 @@ function ActionConfirms({
     },
     onError: (e) => setError(errText(e, "Couldn't duplicate the ticket.")),
   });
+  // Archive / delete need the exact ticket name (re-checked by the server).
+  const projectName = ticket.project?.name ?? "";
+  const confirmNames = { confirmTicketName: ticket.title };
+  const { data: impact, isLoading: impactLoading } = useQuery({
+    queryKey: ["ticket-impact", ticket.id],
+    queryFn: () => api.ticketImpact(ticket.id),
+    enabled: modal === "delete",
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const nameFields = [{ label: "Type the ticket name to confirm", expected: ticket.title }];
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
   const archive = useMutation({
-    mutationFn: () => api.archiveTicket(ticket.id),
+    mutationFn: () => api.archiveTicket(ticket.id, confirmNames),
     meta: { errorTitle: `Couldn't archive ${q(ticket.title)}` },
     onSuccess: () => {
       close();
@@ -301,7 +316,7 @@ function ActionConfirms({
     onError: (e) => setError(errText(e, "Couldn't restore the ticket.")),
   });
   const del = useMutation({
-    mutationFn: () => api.deleteTicket(ticket.id),
+    mutationFn: () => api.deleteTicket(ticket.id, confirmNames),
     meta: { errorTitle: `Couldn't delete ${q(ticket.title)}` },
     onSuccess: () => {
       toast.success(`Ticket ${q(ticket.title)} has been permanently deleted.`);
@@ -333,24 +348,25 @@ function ActionConfirms({
         onConfirm={() => duplicate.mutate()}
         onClose={close}
       />
-      <ConfirmModal
+      <TypeToConfirmModal
         open={modal === "archive"}
         title="Archive ticket?"
-        message={
-          <>
-            <p>
-              <span className="font-medium">"{ticket.title}"</span> will be hidden from ticket lists and from
-              customers, and becomes read-only. Nothing is deleted — you can restore it at any time.
-            </p>
-            {err}
-          </>
-        }
-        confirmLabel="Archive"
+        confirmLabel="Archive ticket"
+        pendingLabel="Archiving…"
         variant="primary"
         pending={archive.isPending}
+        error={error}
+        testId="archive-ticket"
+        fields={nameFields}
         onConfirm={() => archive.mutate()}
         onClose={close}
-      />
+      >
+        <p>
+          <span className="font-medium text-fg">"{ticket.title}"</span> (project{" "}
+          "{projectName}") will be hidden from ticket lists and from
+          customers, and becomes read-only. Nothing is deleted — you can restore it at any time.
+        </p>
+      </TypeToConfirmModal>
       <ConfirmModal
         open={modal === "restore"}
         title="Restore ticket?"
@@ -369,25 +385,36 @@ function ActionConfirms({
         onConfirm={() => restore.mutate()}
         onClose={close}
       />
-      <ConfirmModal
+      <TypeToConfirmModal
         open={modal === "delete"}
         title="Delete ticket?"
-        message={
-          <>
-            <p>
-              This will permanently delete <span className="font-medium">"{ticket.title}"</span> and all of its
-              comments, attachments and activity history. This can't be undone.
-            </p>
-            {ticket.can?.archive && (
-              <p className="mt-2 text-muted">Not sure? Archive it instead — it can be restored.</p>
-            )}
-            {err}
-          </>
-        }
+        confirmLabel="Delete ticket"
+        pendingLabel="Deleting…"
         pending={del.isPending}
+        loading={impactLoading}
+        error={error}
+        testId="delete-ticket"
+        fields={nameFields}
         onConfirm={() => del.mutate()}
         onClose={close}
-      />
+      >
+        <p>
+          This permanently deletes <span className="font-medium text-fg">"{ticket.title}"</span> from project{" "}
+          "{projectName}"
+          {impactLoading ? "…" : " together with:"}
+        </p>
+        {impact && (
+          <ul className="mt-2 list-disc pl-5" data-testid="delete-ticket-impact">
+            <li>{plural(impact.comments, "comment", "comments")}</li>
+            <li>{plural(impact.attachments, "attachment (uploaded files)", "attachments (uploaded files)")}</li>
+            <li>{plural(impact.activity, "activity history entry", "activity history entries")}</li>
+            <li>{plural(impact.followers, "follower subscription", "follower subscriptions")}</li>
+          </ul>
+        )}
+        <p className="mt-2">
+          This can't be undone. {ticket.can?.archive && "Not sure? Archive it instead — it can be restored."}
+        </p>
+      </TypeToConfirmModal>
     </>
   );
 }
@@ -471,10 +498,10 @@ function EditModal({
                 options={TYPES.map((t) => ({ value: t, label: t }))}
               />
             </div>
-            <label className="block">
+            <div>
               <span className="eyebrow mb-1.5 block">Due date</span>
-              <input type="date" className="input" value={due} onChange={(e) => setDue(e.target.value)} />
-            </label>
+              <DatePicker size="md" ariaLabel="Due date" placeholder="No due date" value={due} onChange={setDue} />
+            </div>
           </div>
         )}
         {save.isError && (

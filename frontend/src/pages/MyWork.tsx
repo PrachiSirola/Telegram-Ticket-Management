@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useOrg } from "../org";
 import { Dropdown } from "../components/Dropdown";
-import { Pagination } from "../components/Pagination";
+import { TablePagination } from "../components/TablePagination";
+import { BulkStatusBar, RowCheck, useBulkSelect, type BulkSelect } from "../components/BulkStatus";
+import { isInternalIn, useAuth } from "../auth";
 import { StatusBadge, PriorityBadge } from "../components/ui";
 import {
   IconSearch,
@@ -15,9 +17,9 @@ import {
   IconClock,
 } from "../components/Icons";
 import { DateRangeFilter, type DateRangeValue } from "../components/DateRangeFilter";
-import type { CompletedTicket, Ticket, TicketPriority, WorkStatusFilter } from "../types";
+import type { AssignmentInfo, CompletedTicket, TicketPriority, WorkStatusFilter, WorkTicket } from "../types";
 
-const PAGE_SIZE = 15;
+const DEFAULT_PAGE_SIZE = 10; // same page sizes as every other ticket table (10 / 25 / 50 / 100)
 
 const SECTION_TITLES: Record<WorkStatusFilter, string> = {
   all: "My Work",
@@ -43,10 +45,12 @@ export default function MyWork() {
   const [status, setStatus] = useState<WorkStatusFilter>(DEFAULT_STATUS);
   const [priority, setPriority] = useState<TicketPriority | "">("");
   const [projectId, setProjectId] = useState("");
+  const [assignedBy, setAssignedBy] = useState("");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [completedPage, setCompletedPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
@@ -56,7 +60,7 @@ export default function MyWork() {
   useEffect(() => {
     setPage(1);
     setCompletedPage(1);
-  }, [range, customFrom, customTo, status, priority, projectId, debouncedSearch]);
+  }, [range, customFrom, customTo, status, priority, projectId, assignedBy, debouncedSearch, pageSize]);
 
   const { data: projects } = useQuery({
     queryKey: ["projects", activeOrgId],
@@ -64,7 +68,7 @@ export default function MyWork() {
     enabled: !!activeOrgId,
   });
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isFetching, isPlaceholderData } = useQuery({
     queryKey: [
       "myWork",
       activeOrgId,
@@ -74,9 +78,11 @@ export default function MyWork() {
       status,
       priority,
       projectId,
+      assignedBy,
       debouncedSearch,
       page,
       completedPage,
+      pageSize,
     ],
     queryFn: () =>
       api.myWork(activeOrgId, {
@@ -85,18 +91,45 @@ export default function MyWork() {
         status,
         priority: priority || undefined,
         projectId: projectId || undefined,
+        assignedBy: assignedBy || undefined,
         q: debouncedSearch || undefined,
         page,
-        pageSize: PAGE_SIZE,
+        pageSize,
         completedPage,
-        completedPageSize: PAGE_SIZE,
+        completedPageSize: pageSize,
       }),
     enabled: !!activeOrgId,
+    // Keep the current rows (dimmed) while the next page loads instead of flashing a skeleton.
+    placeholderData: keepPreviousData,
   });
 
   const summary = data?.summary;
   const work = data?.work;
   const completedWork = data?.completedWork;
+
+  // If a page ends up past the end (e.g. its last tickets were just moved), step back to the last real page.
+  useEffect(() => {
+    if (!data || isPlaceholderData) return;
+    const last = (t: number, size: number) => Math.max(1, Math.ceil(t / size));
+    if (data.work.total > 0 && page > last(data.work.total, data.work.pageSize)) setPage(last(data.work.total, data.work.pageSize));
+    if (data.completedWork.total > 0 && completedPage > last(data.completedWork.total, data.completedWork.pageSize))
+      setCompletedPage(last(data.completedWork.total, data.completedWork.pageSize));
+  }, [data, isPlaceholderData, page, completedPage]);
+  const { me } = useAuth();
+  const canBulk = isInternalIn(me, activeOrgId);
+  const toItems = (l?: { id: string; title: string }[]) => (canBulk ? l?.map((t) => ({ id: t.id, title: t.title })) : undefined);
+  const workBulk = useBulkSelect(toItems(work?.items));
+  const completedBulk = useBulkSelect(toItems(completedWork?.items));
+
+  // Assigned By options come from the server (everyone who assigned one of my tickets). Names are remembered so
+  // a selected person stays in the list even when another filter temporarily narrows the options.
+  const knownAssigners = useRef(new Map<string, string>());
+  data?.assigners?.forEach((p) => knownAssigners.current.set(p.id, p.name));
+  const assignerOptions = useMemo(() => {
+    const list = [...(data?.assigners ?? [])];
+    if (assignedBy && !list.some((p) => p.id === assignedBy)) list.push({ id: assignedBy, name: knownAssigners.current.get(assignedBy) ?? "Selected" });
+    return [{ value: "", label: "All assigners" }, ...list.map((p) => ({ value: p.id, label: p.name }))];
+  }, [data?.assigners, assignedBy]);
 
   return (
     <div className="space-y-6">
@@ -142,6 +175,17 @@ export default function MyWork() {
             ...(projects ?? []).map((p) => ({ value: p.id, label: p.name })),
           ]}
         />
+        <Dropdown
+          className="w-48"
+          size="sm"
+          placeholder="All assigners"
+          ariaLabel="Assigned by"
+          searchable
+          searchPlaceholder="Search people…"
+          value={assignedBy}
+          onChange={setAssignedBy}
+          options={assignerOptions}
+        />
         <div className="relative min-w-[200px] flex-1 sm:max-w-[260px] sm:flex-none">
           <IconSearch size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
           <input
@@ -159,11 +203,18 @@ export default function MyWork() {
         <h2 className="mb-3 text-lg font-bold tracking-tight text-fg" style={{ fontFamily: "var(--font-display)" }}>
           {SECTION_TITLES[status]}
         </h2>
-        <div className="card overflow-hidden">
-          <WorkTable tickets={work?.items} loading={isLoading} />
+        <div className={`card overflow-hidden transition-opacity ${isFetching && isPlaceholderData ? "opacity-60" : ""}`} aria-busy={isFetching && isPlaceholderData}>
+          <WorkTable tickets={work?.items} loading={isLoading} bulk={canBulk ? workBulk : undefined} />
         </div>
         {work && work.total > 0 && (
-          <Pagination page={work.page} total={work.total} pageSize={work.pageSize} onPageChange={setPage} />
+          <TablePagination
+            page={page}
+            pageSize={pageSize}
+            total={work.total}
+            busy={isFetching}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+          />
         )}
       </section>
 
@@ -173,15 +224,17 @@ export default function MyWork() {
         <h2 className="mb-3 text-lg font-bold tracking-tight text-fg" style={{ fontFamily: "var(--font-display)" }}>
           Completed Work
         </h2>
-        <div className="card overflow-hidden">
-          <CompletedTable tickets={completedWork?.items} loading={isLoading} timeZone={timeZone} />
+        <div className={`card overflow-hidden transition-opacity ${isFetching && isPlaceholderData ? "opacity-60" : ""}`} aria-busy={isFetching && isPlaceholderData}>
+          <CompletedTable tickets={completedWork?.items} loading={isLoading} timeZone={timeZone} bulk={canBulk ? completedBulk : undefined} />
         </div>
         {completedWork && completedWork.total > 0 && (
-          <Pagination
-            page={completedWork.page}
+          <TablePagination
+            page={completedPage}
+            pageSize={pageSize}
             total={completedWork.total}
-            pageSize={completedWork.pageSize}
+            busy={isFetching}
             onPageChange={setCompletedPage}
+            onPageSizeChange={setPageSize}
           />
         )}
       </section>
@@ -238,9 +291,26 @@ function SummaryCard({
   );
 }
 
-const ROW_GRID = "sm:grid-cols-[1fr_2fr_110px_120px_130px]";
+const ROW_GRID = "sm:grid-cols-[1fr_1.8fr_1fr_100px_110px_120px]";
 
-function WorkTable({ tickets, loading }: { tickets?: Ticket[]; loading: boolean }) {
+/** "Assigned By" cell: the latest person who assigned or reassigned the ticket. */
+function assignedByTip(info: AssignmentInfo): string | undefined {
+  if (!info.assignedBy?.at) return undefined;
+  const when = new Date(info.assignedBy.at).toLocaleString();
+  if (info.assignmentCount > 1) {
+    return `Originally assigned by ${info.firstAssignedBy?.name ?? "—"} · reassigned ${info.assignmentCount - 1} time${info.assignmentCount === 2 ? "" : "s"} · last on ${when}`;
+  }
+  return `Assigned on ${when}`;
+}
+function AssignedByCell({ info }: { info: AssignmentInfo }) {
+  return (
+    <span className="truncate text-sm text-fg-soft" data-testid="assigned-by" title={assignedByTip(info)}>
+      {info.assignedBy?.name ?? "—"}
+    </span>
+  );
+}
+
+function WorkTable({ tickets, loading, bulk }: { tickets?: WorkTicket[]; loading: boolean; bulk?: BulkSelect }) {
   if (loading) {
     return (
       <div className="space-y-3 p-5">
@@ -262,25 +332,30 @@ function WorkTable({ tickets, loading }: { tickets?: Ticket[]; loading: boolean 
     );
   }
   return (
-    <div>
+    <div className="overflow-x-auto">
+      <div className="sm:min-w-[780px]">
+      {bulk && <BulkStatusBar select={bulk} />}
       <div
-        className={`hidden gap-3 border-b border-card-border bg-accent/40 px-5 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted sm:grid ${ROW_GRID}`}
+        className={`hidden gap-3 border-b border-card-border bg-accent/40 py-2.5 pr-5 text-[11px] font-semibold uppercase tracking-wide text-muted sm:grid ${bulk?.active ? "pl-[52px]" : "pl-5"} ${ROW_GRID}`}
       >
         <span>Project</span>
         <span>Ticket</span>
+        <span>Assigned By</span>
         <span>Priority</span>
         <span>Due Date</span>
         <span>Status</span>
       </div>
       <div className="divide-line">
         {tickets.map((t) => (
+          <BulkRow key={t.id} bulk={bulk} id={t.id} title={t.title}>
           <Link
-            key={t.id}
             to={`/tickets/${t.id}`}
-            className={`grid grid-cols-1 gap-1.5 px-5 py-3.5 transition-colors hover:bg-accent sm:items-center sm:gap-3 ${ROW_GRID}`}
+            className={`grid grid-cols-1 gap-1.5 py-3.5 transition-colors hover:bg-accent sm:items-center sm:gap-3 ${bulk?.active ? "min-w-0 flex-1 pl-4 pr-5" : "px-5"} ${ROW_GRID}`}
           >
             <span className="truncate text-sm font-medium text-fg-soft">{t.project?.name ?? "—"}</span>
             <span className="truncate text-sm font-semibold text-fg">{t.title}</span>
+            <span className="hidden sm:block"><AssignedByCell info={t} /></span>
+            <span className="text-xs text-muted sm:hidden">Assigned by {t.assignedBy?.name ?? "—"}</span>
             <span>
               <PriorityBadge priority={t.priority} />
             </span>
@@ -291,15 +366,17 @@ function WorkTable({ tickets, loading }: { tickets?: Ticket[]; loading: boolean 
               <StatusBadge status={t.status} />
             </span>
           </Link>
+          </BulkRow>
         ))}
+      </div>
       </div>
     </div>
   );
 }
 
-const COMPLETED_GRID = "sm:grid-cols-[2fr_1fr_140px]";
+const COMPLETED_GRID = "sm:grid-cols-[2fr_1fr_1fr_140px]";
 
-function CompletedTable({ tickets, loading, timeZone }: { tickets?: CompletedTicket[]; loading: boolean; timeZone?: string }) {
+function CompletedTable({ tickets, loading, timeZone, bulk }: { tickets?: CompletedTicket[]; loading: boolean; timeZone?: string; bulk?: BulkSelect }) {
   if (loading) {
     return (
       <div className="space-y-3 p-5">
@@ -320,30 +397,51 @@ function CompletedTable({ tickets, loading, timeZone }: { tickets?: CompletedTic
     );
   }
   return (
-    <div>
+    <div className="overflow-x-auto">
+      <div className="sm:min-w-[700px]">
+      {bulk && <BulkStatusBar select={bulk} />}
       <div
-        className={`hidden gap-3 border-b border-card-border bg-accent/40 px-5 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted sm:grid ${COMPLETED_GRID}`}
+        className={`hidden gap-3 border-b border-card-border bg-accent/40 py-2.5 pr-5 text-[11px] font-semibold uppercase tracking-wide text-muted sm:grid ${bulk?.active ? "pl-[52px]" : "pl-5"} ${COMPLETED_GRID}`}
       >
         <span>Ticket</span>
         <span>Project</span>
+        <span>Assigned By</span>
         <span>Completed Date</span>
       </div>
       <div className="divide-line">
         {tickets.map((t) => (
+          <BulkRow key={t.id} bulk={bulk} id={t.id} title={t.title}>
           <Link
-            key={t.id}
             to={`/tickets/${t.id}`}
-            className={`grid grid-cols-1 gap-1.5 px-5 py-3.5 transition-colors hover:bg-accent sm:items-center sm:gap-3 ${COMPLETED_GRID}`}
+            className={`grid grid-cols-1 gap-1.5 py-3.5 transition-colors hover:bg-accent sm:items-center sm:gap-3 ${bulk?.active ? "min-w-0 flex-1 pl-4 pr-5" : "px-5"} ${COMPLETED_GRID}`}
           >
             <span className="truncate text-sm font-semibold text-fg">{t.title}</span>
             <span className="truncate text-sm text-fg-soft">{t.project?.name ?? "—"}</span>
+            <span className="hidden sm:block"><AssignedByCell info={t} /></span>
+            <span className="text-xs text-muted sm:hidden">Assigned by {t.assignedBy?.name ?? "—"}</span>
             <span className="flex items-center gap-1.5 text-sm font-medium text-ok">
               <IconCheckCircle size={14} />
               {new Date(t.completedAt).toLocaleDateString(undefined, { timeZone })}
             </span>
           </Link>
+          </BulkRow>
         ))}
       </div>
+      </div>
+    </div>
+  );
+}
+
+/** Wraps a My Work row with its select checkbox (just the row when bulk select is off). */
+function BulkRow({ bulk, id, title, children }: { bulk?: BulkSelect; id: string; title: string; children: React.ReactNode }) {
+  if (!bulk?.active) return <>{children}</>;
+  const checked = bulk.selected.has(id);
+  return (
+    <div className={`flex items-stretch ${checked ? "bg-accent/70" : ""}`} data-testid="ticket-row">
+      <div className="flex items-center pl-5">
+        <RowCheck checked={checked} onToggle={() => bulk.toggle(id)} label={`Select ${title}`} />
+      </div>
+      {children}
     </div>
   );
 }

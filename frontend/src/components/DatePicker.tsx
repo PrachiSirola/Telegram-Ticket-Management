@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Popover } from "./Popover";
 import { IconCalendar, IconChevronLeft, IconChevronRight } from "./Icons";
 const pad = (n: number) => String(n).padStart(2, "0");
 const toYmd = (y: number, m: number, d: number) => `${y}-${pad(m + 1)}-${pad(d)}`;
@@ -30,6 +31,8 @@ export function DatePicker({
   align = "left",
   className = "",
   testId,
+  size = "sm",
+  up = false,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -44,11 +47,15 @@ export function DatePicker({
   align?: "left" | "right";
   className?: string;
   testId?: string;
+  /** Matches Dropdown sizes: "sm" for filter bars, "md" for form fields. */
+  size?: "sm" | "md";
+  /** Prefer opening above the field (it flips automatically when there is no room either way). */
+  up?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
-  const [shiftX, setShiftX] = useState(0);
+  const btnRef = useRef<HTMLButtonElement>(null);
   const seed = value || (min && (!today || min > today) ? min : today) || min || "";
   const initial = seed ? parse(seed) : (() => { const n = new Date(); return { y: n.getFullYear(), m: n.getMonth(), d: 1 }; })();
   const [view, setView] = useState({ y: initial.y, m: initial.m });
@@ -57,20 +64,11 @@ export function DatePicker({
     const s = value || (min && (!today || min > today) ? min : today) || min;
     if (s) { const p = parse(s); setView({ y: p.y, m: p.m }); }
   }, [open]);
-  useLayoutEffect(() => {
-    if (!open) { setShiftX(0); return; }
-    if (!popRef.current) return;
-    const r = popRef.current.getBoundingClientRect(); // includes the shift applied so far
-    const margin = 8;
-    let dx = shiftX;
-    if (r.right > window.innerWidth - margin) dx -= r.right - (window.innerWidth - margin);
-    if (r.left - (dx - shiftX) < margin && r.left < margin) dx += margin - r.left;
-    if (Math.abs(dx - shiftX) > 0.5) setShiftX(dx);
-  }, [open, view, shiftX]);
-
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onDoc = (e: MouseEvent) => { const t = e.target as Node;
+      if (ref.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false); };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
     document.addEventListener("mousedown", onDoc, true);
     document.addEventListener("keydown", onKey);
@@ -89,26 +87,28 @@ export function DatePicker({
   return (
     <div ref={ref} className={`relative ${className}`}>
       <button
+        ref={btnRef}
         type="button"
         aria-label={ariaLabel}
         aria-haspopup="dialog"
         aria-expanded={open}
         data-testid={testId}
         onClick={() => setOpen((o) => !o)}
-        className="input flex items-center justify-between gap-2 text-left"
-        style={{ minHeight: 36, padding: "0 10px", fontSize: 13 }}
+        className={`dd-trigger ${size === "sm" ? "sm" : ""} ${open ? "open" : ""}`}
       >
         <span className={value ? "truncate text-fg" : "truncate text-muted"}>{value ? formatYmd(value) : placeholder}</span>
-        <IconCalendar size={15} className="shrink-0 text-muted" />
+        <IconCalendar size={15} className="dd-chevron" />
       </button>
-      {open && (
-        <div
-          ref={popRef}
-          style={shiftX ? { translate: `${shiftX}px 0` } : undefined}
-          role="dialog"
-          aria-label={`${ariaLabel} calendar`}
-          className={`dd-menu absolute z-40 mt-1 w-[288px] max-w-[calc(100vw-32px)] !overflow-visible p-3 ${align === "right" ? "right-0" : "left-0"}`}
-        >
+      <Popover
+        open={open}
+        anchorRef={btnRef}
+        popRef={popRef}
+        align={align}
+        preferUp={up}
+        role="dialog"
+        aria-label={`${ariaLabel} calendar`}
+        className="w-[288px] p-3"
+      >
           <div className="mb-2 flex items-center justify-between">
             <button type="button" aria-label="Previous month" className="btn btn-secondary btn-sm !px-2" onClick={() => shift(-1)}>
               <IconChevronLeft size={16} />
@@ -156,8 +156,7 @@ export function DatePicker({
               </button>
             </div>
           )}
-        </div>
-      )}
+      </Popover>
     </div>
   );
 }

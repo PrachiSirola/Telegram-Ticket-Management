@@ -1,5 +1,5 @@
 import { Router } from "express";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { env } from "../env.js";
@@ -24,12 +24,27 @@ import { passwordResetEmail, sendEmail, pinResetEmail } from "../lib/email.js";
 import { requireAuth } from "../middleware/auth.js";
 import { signTwoFactorChallenge, verifyTwoFactorChallenge } from "../lib/jwt.js";
 import { verifyPin, InvalidPinError, PinLockedError, createPinResetToken, resetPinWithToken} from "../lib/twoFactor.js";
+import {
+  CodeLockedError,
+  InvalidCodeError,
+  AuthenticatorUnavailableError,
+  authenticatorConfigured,
+  verifyAuthenticatorCode,
+} from "../lib/authenticator.js";
 
 
 export const authRouter = Router();
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: Number(process.env.AUTH_RATE_LIMIT) || 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many attempts. Please try again later." },
+});
+
+const alternateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: Number(process.env.ALT_RATE_LIMIT) || 10,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many attempts. Please try again later." },
@@ -69,7 +84,9 @@ authRouter.post("/login", authLimiter, async (req, res) => {
     const user = await loginWithPassword(parsed.data);
     if (user.twoFactorEnabled && user.twoFactorMethod === "PIN") {
       setTwoFactorPendingCookie(res, user.id);
-      return res.json({ ok: true, requires2fa: true, method: "PIN" });
+
+      const alternatives = user.totpEnabledAt && authenticatorConfigured() ? ["authenticator"] : [];
+      return res.json({ ok: true, requires2fa: true, method: "PIN", alternatives });
     }
 
     setSessionCookie(res, user.id);
@@ -102,6 +119,35 @@ authRouter.post("/2fa/verify", authLimiter, async (req, res) => {
     throw err;
   }
 });
+
+const alternateSchema = z.object({ code: z.string().min(1).max(20) });
+
+function pendingChallengeUserId(req: Request): string | null {
+  const token = req.cookies?.[env.twoFactorCookieName];
+  return (token ? verifyTwoFactorChallenge(token) : null)?.userId ?? null;
+}
+function alternateError(res: Response, err: unknown) {
+  if (err instanceof CodeLockedError) return res.status(429).json({ error: err.message });
+  if (err instanceof InvalidCodeError) return res.status(401).json({ error: err.message });
+  if (err instanceof AuthenticatorUnavailableError) return res.status(503).json({ error: err.message });
+  throw err;
+}
+
+authRouter.post("/2fa/authenticator", alternateLimiter, async (req, res) => {
+  const parsed = alternateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Enter the 6-digit code from your authenticator app." });
+  const userId = pendingChallengeUserId(req);
+  if (!userId) return res.status(401).json({ error: "Your session expired. Please log in again." });
+  try {
+    await verifyAuthenticatorCode(userId, parsed.data.code);
+    clearTwoFactorPendingCookie(res);
+    setSessionCookie(res, userId);
+    res.json({ ok: true });
+  } catch (err) {
+    return alternateError(res, err);
+  }
+});
+
 authRouter.post("/2fa/forgot-pin", authLimiter, async (req, res) => {
   const token = req.cookies?.[env.twoFactorCookieName];
   const payload = token ? verifyTwoFactorChallenge(token) : null;
