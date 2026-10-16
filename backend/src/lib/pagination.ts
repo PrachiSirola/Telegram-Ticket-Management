@@ -54,4 +54,3 @@ export async function paginate<T>(
   const items = total === 0 ? [] : await fetch((meta.page - 1) * meta.pageSize, meta.pageSize);
   return { items, ...meta };
 }
-export const TICKET_TIEBREAK = { id: "desc" as const };

@@ -1,7 +1,14 @@
 import { createApp } from "./app.js";
 import { env } from "./env.js";
 import { getNetworkAddresses } from "./lib/network.js";
+import { connectDb, transactionsEnabled } from "./db/index.js";
+import { dbHost, dbName, runStartupUpgrades } from "./db/upgrades.js";
 
+await connectDb();
+console.log(
+  `MongoDB connected successfully (database: ${dbName()}, host: ${dbHost()}, transactions: ${transactionsEnabled() ? "on" : "off"})`,
+);
+await runStartupUpgrades();
 const app = createApp();
 const host = process.env.HOST ?? "0.0.0.0";
 
@@ -25,11 +32,6 @@ app.listen(env.port, host, () => {
 
   console.log(`  Email: ${emailMode}`);
   console.log(`  Frontend URL: ${env.frontendUrl}`);
-
-  // Invite links, password/PIN reset links, and org-creation verification
-  // links are all built from FRONTEND_URL (see env.ts). If it's still
-  // pointing at localhost in production, every link sent to real users is
-  // broken — surface that immediately instead of letting it fail silently.
   if (env.isProd && env.frontendUrl.includes("localhost")) {
     console.warn(
       "  WARNING: FRONTEND_URL is set to a localhost address in production. " +

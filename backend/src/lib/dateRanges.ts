@@ -123,8 +123,8 @@ export function dueDateFilter(w: DateWindow) {
   if (!w.fromDay && !w.toDay) return {};
   return {
     dueDate: {
-      ...(w.fromDay ? { gte: new Date(`${w.fromDay}T00:00:00Z`) } : {}),
-      ...(w.toDay ? { lt: new Date(`${addDays(w.toDay, 1)}T00:00:00Z`) } : {}),
+      ...(w.fromDay ? { $gte: new Date(`${w.fromDay}T00:00:00Z`) } : {}),
+      ...(w.toDay ? { $lt: new Date(`${addDays(w.toDay, 1)}T00:00:00Z`) } : {}),
     },
   };
 }

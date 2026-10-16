@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Response } from "express";
-import type { Invite, Prisma, User } from "@prisma/client";
-import { prisma } from "../prisma.js";
+import { db, isDuplicateKey, withTransaction, type ClientSession } from "../db/index.js";
+import type { Invite, User } from "../db/types.js";
 import { env } from "../env.js";
 import { signSession } from "./jwt.js";
 import { hashPassword, verifyPassword, passwordContainsIdentityError, PasswordPolicyError } from "./password.js";
@@ -47,7 +47,7 @@ export async function loginWithPassword(input: {
   password: string;
 }): Promise<User> {
   const email = input.email.toLowerCase();
-  const user = await prisma.user.findUnique({ where: { email } });
+  const user = await db.users.findOne({ email });
   if (!user) throw new InvalidCredentialsError();
   const ok = await verifyPassword(input.password, user.passwordHash);
   if (!ok) throw new InvalidCredentialsError();
@@ -55,7 +55,7 @@ export async function loginWithPassword(input: {
 }
 
 async function loadUsableInvite(token: string): Promise<Invite | null> {
-  const invite = await prisma.invite.findUnique({ where: { token } });
+  const invite = await db.invites.findOne({ token });
   if (!invite || invite.status !== "PENDING" || invite.expiresAt < new Date()) return null;
   return invite;
 }
@@ -63,14 +63,11 @@ export async function getInviteByToken(token: string) {
   const invite = await loadUsableInvite(token);
   if (!invite) return null;
   const [org, projects, existing] = await Promise.all([
-    prisma.organization.findUniqueOrThrow({ where: { id: invite.orgId } }),
+    db.orgs.mustById(invite.orgId),
     invite.projectIds.length
-      ? prisma.project.findMany({
-          where: { id: { in: invite.projectIds }, orgId: invite.orgId },
-          select: { name: true },
-        })
+      ? db.projects.find({ _id: { $in: invite.projectIds }, orgId: invite.orgId })
       : Promise.resolve([]),
-    prisma.user.findUnique({ where: { email: invite.email } }),
+    db.users.findOne({ email: invite.email.toLowerCase() }),
   ]);
   return {
     email: invite.email,
@@ -81,39 +78,30 @@ export async function getInviteByToken(token: string) {
     accountExists: Boolean(existing),
   };
 }
-async function consumeInvite(tx: Prisma.TransactionClient, invite: Invite, userId: string) {
-  const membership = await tx.orgMembership.upsert({
-    where: { userId_orgId: { userId, orgId: invite.orgId } },
-    update: { role: invite.role, disabled: false },
-    create: { userId, orgId: invite.orgId, role: invite.role },
-  });
-  if (invite.role === "CLIENT" && invite.projectIds.length) {
-    const projects = await tx.project.findMany({
-      where: { id: { in: invite.projectIds }, orgId: invite.orgId },
-      select: { id: true },
-    });
+async function consumeInvite(session: ClientSession | undefined, invite: Invite, userId: string) {
+  const membership = await db.memberships.upsert(
+    { userId, orgId: invite.orgId },
+    { role: invite.role, disabled: false },
+    { userId, orgId: invite.orgId },
+    { session },
+  );
+  const link =
+    invite.role === "CLIENT" ? db.projectClients : invite.role === "DEVELOPER" ? db.projectDevelopers : null;
+  if (link && invite.projectIds.length) {
+    const projects = await db.projects.find(
+      { _id: { $in: invite.projectIds }, orgId: invite.orgId },
+      { select: ["id"], session },
+    );
     for (const p of projects) {
-      await tx.projectClient.upsert({
-        where: { projectId_membershipId: { projectId: p.id, membershipId: membership.id } },
-        update: {},
-        create: { projectId: p.id, membershipId: membership.id },
-      });
+      await link.upsert(
+        { projectId: p.id, membershipId: membership.id },
+        {},
+        { projectId: p.id, membershipId: membership.id },
+        { session },
+      );
     }
   }
-  if (invite.role === "DEVELOPER" && invite.projectIds.length) {
-    const projects = await tx.project.findMany({
-      where: { id: { in: invite.projectIds }, orgId: invite.orgId },
-      select: { id: true },
-    });
-    for (const p of projects) {
-      await tx.projectDeveloper.upsert({
-        where: { projectId_membershipId: { projectId: p.id, membershipId: membership.id } },
-        update: {},
-        create: { projectId: p.id, membershipId: membership.id },
-      });
-    }
-  }
-  await tx.invite.update({ where: { id: invite.id }, data: { status: "ACCEPTED" } });
+  await db.invites.mustUpdate({ _id: invite.id }, { status: "ACCEPTED" }, { session });
 }
 export async function registerFromInvite(input: {
   token: string;
@@ -123,29 +111,30 @@ export async function registerFromInvite(input: {
   const invite = await loadUsableInvite(input.token);
   if (!invite) throw new InvalidInviteError();
     const email = invite.email.toLowerCase();
-  if (await prisma.user.findUnique({ where: { email } })) throw new AccountExistsError();
+  if (await db.users.findOne({ email })) throw new AccountExistsError();
 
   const identityErr = passwordContainsIdentityError(input.password, email, input.name);
   if (identityErr) throw new PasswordPolicyError(identityErr);
 
   const passwordHash = await hashPassword(input.password);
-  return prisma.$transaction(async (tx) => {
-    const user = await tx.user.create({
-      data: { email, name: input.name.trim() || email, passwordHash },
+  try {
+    return await withTransaction(async (tx) => {
+      const user = await db.users.create({ email, name: input.name.trim() || email, passwordHash }, { session: tx });
+      await consumeInvite(tx, invite, user.id);
+      return user;
     });
-    await consumeInvite(tx, invite, user.id);
-    return user;
-  });
+  } catch (err) {
+    if (isDuplicateKey(err)) throw new AccountExistsError();
+    throw err;
+  }
 }
-
-/** A logged-in user accepts an invite addressed to their own email. */
 export async function acceptInviteForUser(user: User, token: string): Promise<void> {
   const invite = await loadUsableInvite(token);
   if (!invite) throw new InvalidInviteError();
   if (invite.email.toLowerCase() !== user.email.toLowerCase()) {
     throw new InviteEmailMismatchError(invite.email);
   }
-  await prisma.$transaction((tx) => consumeInvite(tx, invite, user.id));
+  await withTransaction((tx) => consumeInvite(tx, invite, user.id));
 }
 
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -156,44 +145,41 @@ function hashToken(token: string) {
 export async function createPasswordResetToken(
   email: string,
 ): Promise<{ token: string; user: User } | null> {
-  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  const user = await db.users.findOne({ email: email.toLowerCase() });
   if (!user) return null;
 
   const token = randomBytes(32).toString("hex");
-  await prisma.passwordResetToken.create({
-    data: {
-      userId: user.id,
-      tokenHash: hashToken(token),
-      expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS),
-    },
+  await db.passwordResets.create({
+    userId: user.id,
+    tokenHash: hashToken(token),
+    expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS),
   });
   return { token, user };
 }
 export async function resetPasswordWithToken(token: string, newPassword: string): Promise<User> {
-  const record = await prisma.passwordResetToken.findUnique({
-    where: { tokenHash: hashToken(token) },
-  });
+  const record = await db.passwordResets.findOne({ tokenHash: hashToken(token) });
   if (!record || record.usedAt || record.expiresAt < new Date()) {
     throw new Error("This reset link is invalid or has expired.");
   }
 
-  const existingUser = await prisma.user.findUniqueOrThrow({ where: { id: record.userId } });
+  const existingUser = await db.users.mustById(record.userId);
 
   const identityErr = passwordContainsIdentityError(newPassword, existingUser.email, existingUser.name);
   if (identityErr) throw new PasswordPolicyError(identityErr);
   return changePasswordWithHistory(existingUser.id, newPassword, {
     verify: async (tx) => {
-      const fresh = await tx.passwordResetToken.findUnique({ where: { id: record.id } });
+      const fresh = await db.passwordResets.byId(record.id, { session: tx });
       if (!fresh || fresh.usedAt || fresh.expiresAt < new Date()) {
         throw new Error("This reset link is invalid or has expired.");
       }
     },
     after: async (tx) => {
-      await tx.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } });
-      await tx.passwordResetToken.updateMany({
-        where: { userId: record.userId, usedAt: null, id: { not: record.id } },
-        data: { usedAt: new Date() },
-      });
+      await db.passwordResets.mustUpdate({ _id: record.id }, { usedAt: new Date() }, { session: tx });
+      await db.passwordResets.updateMany(
+        { userId: record.userId, usedAt: null, _id: { $ne: record.id } },
+        { usedAt: new Date() },
+        { session: tx },
+      );
     },
   });
 }

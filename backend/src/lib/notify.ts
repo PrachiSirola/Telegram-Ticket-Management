@@ -1,5 +1,5 @@
-import type { NotificationType } from "@prisma/client";
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
+import type { NotificationType } from "../db/types.js";
 import { env } from "../env.js";
 import { sendTelegram } from "./telegram.js";
 
@@ -24,33 +24,32 @@ export async function notify(opts: NotifyOpts) {
 
   let recipients: string[] = [];
   if (candidates.length > 0) {
-    const memberships = await prisma.orgMembership.findMany({
-      where: { orgId: opts.orgId, userId: { in: candidates }, disabled: false },
-      include: {
-        projectAccess: { where: { projectId: opts.ticket.projectId }, select: { id: true } },
-      },
-    });
-    recipients = memberships
-      .filter((m) => m.role !== "CLIENT" || m.projectAccess.length > 0)
-      .map((m) => m.userId);
+    const memberships = await db.memberships.find({ orgId: opts.orgId, userId: { $in: candidates }, disabled: false });
+    const clientIds = memberships.filter((m) => m.role === "CLIENT").map((m) => m.id);
+    const attached = new Set(
+      clientIds.length
+        ? await db.projectClients.distinct("membershipId", {
+            projectId: opts.ticket.projectId,
+            membershipId: { $in: clientIds },
+          })
+        : [],
+    );
+    recipients = memberships.filter((m) => m.role !== "CLIENT" || attached.has(m.id)).map((m) => m.userId);
   }
 
   if (recipients.length > 0) {
-    await prisma.notification.createMany({
-      data: recipients.map((userId) => ({
+    await db.notifications.createMany(
+      recipients.map((userId) => ({
         userId,
         type: opts.type,
         ticketId: opts.ticket.id,
         payload: { message: opts.message, ticketTitle: opts.ticket.title },
       })),
-    });
+    );
   }
 
   if (opts.telegram) {
-    const org = await prisma.organization.findUnique({
-      where: { id: opts.orgId },
-      select: { telegramBotToken: true, telegramChatId: true },
-    });
+    const org = await db.orgs.byId(opts.orgId);
     const cfg =
       org?.telegramBotToken && org.telegramChatId
         ? { botToken: org.telegramBotToken, chatId: org.telegramChatId }

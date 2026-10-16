@@ -141,6 +141,8 @@ export interface Ticket {
   type: TicketType;
   dueDate: string | null;
   estimate: number | null;
+  assignees: UserLite[];
+  assigneeIds?: string[];
   assignee: UserLite | null;
   reporter: UserLite | null;
   archivedAt?: string | null;
@@ -201,11 +203,10 @@ export interface Attachment {
   previewable?: boolean;
   canDelete?: boolean;
   canChangeVisibility?: boolean;
-  /** Who a "Selected Members" file is shared with (team only). */
   selectedUsers?: { id: string; name: string }[];
 }
 
-/** A person who can be picked as a follower / file recipient (the project's team). */
+
 export interface TeamMember {
   userId: string;
   name: string;
@@ -258,13 +259,12 @@ export interface Notification {
   ticket: { id: string; title: string; projectId: string; orgId: string; orgName: string };
 }
 
-/** Who assigned a ticket, from its activity log (see backend lib/assignedBy.ts). */
 export interface AssignmentInfo {
-  /** The person behind the LATEST assignment or reassignment (the reporter when there is no history). */
+
   assignedBy: { id: string; name: string; at: string | null } | null;
-  /** The person behind the ORIGINAL assignment — what the Assigned By filter matches. */
+
   firstAssignedBy: { id: string; name: string } | null;
-  /** How many times the ticket has been assigned (2+ means it was reassigned). */
+
   assignmentCount: number;
 }
 
@@ -276,7 +276,6 @@ export interface CompletedTicket extends WorkTicket {
 
 export interface MyWorkSummary {
   assigned: number;
-  /** Open tickets in range — what the Assigned card shows. */
   open: number;
   inProgress: number;
   completed: number;
@@ -287,9 +286,7 @@ export interface MyWorkResponse {
   summary: MyWorkSummary;
   work: Paged<WorkTicket>;
   completedWork: Paged<CompletedTicket>;
-  /** Everyone who assigned one of my tickets — the options of the Assigned By filter. */
   assigners: { id: string; name: string }[];
-  /** The resolved window (org timezone) the server applied. */
   window?: { range: WorkRange; fromDay: string | null; toDay: string | null; timezone: string };
 }
 export interface BulkStatusResult {

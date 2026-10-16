@@ -21,7 +21,7 @@ import {
   IconUser,
   IconUserPlus,
 } from "./Icons";
-import type { Member, Ticket, TicketPriority, TicketStatus, TicketType } from "../types";
+import type { Member, TeamMember, Ticket, TicketPriority, TicketStatus, TicketType } from "../types";
 
 const STATUSES: TicketStatus[] = ["OPEN", "IN_PROGRESS", "DONE"];
 const PRIORITIES: TicketPriority[] = ["LOW", "MEDIUM", "HIGH", "URGENT"];
@@ -33,12 +33,6 @@ function errText(e: any, fallback: string) {
   return typeof d === "string" ? d : fallback;
 }
 
-/**
- * Edit · Assign · Status · Priority · More (Duplicate, Move, Add Follower,
- * Copy Link, Archive/Restore, Delete). Which buttons show is decided by the
- * `can` flags the API computes for the signed-in user; the API enforces the
- * same rules again on every request.
- */
 export function TicketActions({
   ticket,
   me,
@@ -46,31 +40,29 @@ export function TicketActions({
 }: {
   ticket: Ticket;
   me: { id: string; name: string } | null;
-  assignable: Member[];
+  assignable: TeamMember[];
 }) {
   const can = ticket.can;
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [modal, setModal] = useState<
-    null | "edit" | "move" | "followers" | "archive" | "restore" | "delete" | "duplicate"
+    null | "edit" | "move" | "followers" | "archive" | "restore" | "delete" | "duplicate" | "assign"
   >(null);
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["ticket", ticket.id] });
     qc.invalidateQueries({ queryKey: ["activity", ticket.id] });
     qc.invalidateQueries({ queryKey: ["tickets"] });
-    // Status changes move a project's open-ticket count (and so its position on the Dashboard).
     qc.invalidateQueries({ queryKey: ["projects"] });
   };
 
   const update = useMutation({
     mutationFn: (data: Parameters<typeof api.updateTicket>[1]) => api.updateTicket(ticket.id, data),
     meta: { errorTitle: `Couldn't update ${q(ticket.title)}` },
-    // Snapshot the "before" values at click time so the toast can say what changed.
     onMutate: () => ({
       title: ticket.title,
       status: ticket.status,
       priority: ticket.priority,
-      assignee: ticket.assignee?.name ?? null,
+      assignees: (ticket.assignees ?? []).map((a) => a.name),
     }),
     onSuccess: (_res, data, before) => {
       const t = q(before?.title ?? ticket.title);
@@ -79,36 +71,24 @@ export function TicketActions({
         parts.push(`status changed from ${humanize(before?.status)} to ${humanize(data.status)}`);
       if (data.priority && data.priority !== before?.priority)
         parts.push(`priority changed from ${humanize(before?.priority)} to ${humanize(data.priority)}`);
-      if ("assigneeId" in data) {
-        const to = data.assigneeId ? assignable.find((m) => m.userId === data.assigneeId)?.name ?? "the selected member" : null;
-        if (!to) parts.push(`unassigned${before?.assignee ? ` (was ${before.assignee})` : ""}`);
-        else if (before?.assignee) parts.push(`reassigned from ${before.assignee} to ${to}`);
-        else parts.push(`assigned to ${to}`);
+      if (data.assigneeIds) {
+        const now = data.assigneeIds.map((id) => assignable.find((m) => m.userId === id)?.name ?? "a member");
+        const was = before?.assignees ?? [];
+        const added = now.filter((n) => !was.includes(n));
+        const removed = was.filter((n) => !now.includes(n));
+        if (added.length) parts.push(`assigned to ${added.join(", ")}`);
+        if (removed.length) parts.push(`${removed.join(", ")} unassigned`);
+        if (!now.length && !removed.length) parts.push("no assignees");
       }
       toast.success(parts.length ? `Ticket ${t}: ${parts.join("; ")}.` : `Ticket ${t} was updated.`);
       refresh();
     },
   });
-  const selfAssign = useMutation({
-    mutationFn: () => api.selfAssign(ticket.id),
-    meta: { errorTitle: `Couldn't assign ${q(ticket.title)}` },
-    onMutate: () => ({ title: ticket.title, assignee: ticket.assignee?.name ?? null }),
-    onSuccess: (_res, _v, before) => {
-      toast.success(
-        before?.assignee
-          ? `Ticket ${q(before.title)} reassigned from ${before.assignee} to you.`
-          : `Ticket ${q(before?.title ?? ticket.title)} assigned to you.`,
-      );
-      refresh();
-    },
-  });
-
   async function copyLink() {
     const url = `${window.location.origin}/tickets/${ticket.id}`;
     try {
       await navigator.clipboard.writeText(url);
     } catch {
-      // Clipboard API needs HTTPS / permission; fall back to a hidden textarea.
       const ta = document.createElement("textarea");
       ta.value = url;
       ta.style.position = "fixed";
@@ -123,16 +103,6 @@ export function TicketActions({
   }
 
   if (!can) return null;
-
-  const assignItems: MenuItem[] = [
-    { key: "assign-none", label: "Unassigned", checked: !ticket.assignee, onSelect: () => update.mutate({ assigneeId: null }) },
-    ...assignable.map((m) => ({
-      key: `assign-${m.userId}`,
-      label: m.userId === me?.id ? `${m.name} (me)` : m.name,
-      checked: ticket.assignee?.id === m.userId,
-      onSelect: () => ticket.assignee?.id !== m.userId && update.mutate({ assigneeId: m.userId }),
-    })),
-  ];
 
   const moreItems: MenuItem[] = [
     { key: "duplicate", label: "Duplicate", icon: <IconCopy size={15} />, hidden: !can.duplicate, onSelect: () => setModal("duplicate") },
@@ -153,28 +123,21 @@ export function TicketActions({
             Edit
           </button>
         )}
-        {can.assign ? (
-          <MenuButton
-            label={ticket.assignee ? `Assignee: ${ticket.assignee.name}` : "Assign"}
-            icon={<IconUser size={14} />}
-            testId="action-assign"
-            items={assignItems}
+        {can.assign && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            data-testid="action-assign"
             disabled={update.isPending}
-            width="w-64"
-          />
-        ) : (
-          can.selfAssign &&
-          ticket.assignee?.id !== me?.id && (
-            <button
-              className="btn btn-secondary btn-sm"
-              data-testid="action-assign-me"
-              disabled={selfAssign.isPending}
-              onClick={() => selfAssign.mutate()}
-            >
-              <IconUser size={14} />
-              {selfAssign.isPending ? "Assigning…" : "Assign to me"}
-            </button>
-          )
+            onClick={() => setModal("assign")}
+          >
+            <IconUser size={14} />
+            {ticket.assignees?.length === 0
+              ? "Assign"
+              : ticket.assignees?.length === 1
+                ? `Assignee: ${ticket.assignees[0].name}`
+                : `Assignees: ${ticket.assignees[0].name} +${ticket.assignees.length - 1}`}
+          </button>
         )}
         {can.changeStatus && (
           <MenuButton
@@ -212,6 +175,16 @@ export function TicketActions({
         />
       </div>
 
+      {modal === "assign" && (
+        <AssignModal
+          ticket={ticket}
+          me={me}
+          assignable={assignable}
+          saving={update.isPending}
+          onClose={() => setModal(null)}
+          onSave={(ids) => update.mutate({ assigneeIds: ids }, { onSuccess: () => setModal(null) })}
+        />
+      )}
       {modal === "edit" && (
         <EditModal
           ticket={ticket}
@@ -252,7 +225,7 @@ export function TicketActions({
   );
 }
 
-// ---------------------------------------------------------------------------
+
 function ActionConfirms({
   ticket,
   modal,
@@ -419,7 +392,6 @@ function ActionConfirms({
   );
 }
 
-// ---------------------------------------------------------------------------
 function EditModal({
   ticket,
   internal,
@@ -450,7 +422,6 @@ function EditModal({
       return Object.keys(data).length ? api.updateTicket(ticket.id, data) : Promise.resolve(ticket);
     },
     onSuccess: () => {
-      // Describe what actually changed, with before -> after where it helps.
       const parts: string[] = [];
       const prevDue = ticket.dueDate ? ticket.dueDate.slice(0, 10) : "";
       if (title.trim() !== ticket.title) parts.push(`title changed to ${q(title.trim())}`);
@@ -694,6 +665,78 @@ function FollowersModal({
         <button className="btn btn-secondary btn-sm" onClick={onClose}>
           Done
         </button>
+      </div>
+    </Modal>
+  );
+}
+
+function AssignModal({
+  ticket,
+  me,
+  assignable,
+  saving,
+  onClose,
+  onSave,
+}: {
+  ticket: Ticket;
+  me: { id: string; name: string } | null;
+  assignable: Member[] | TeamMember[];
+  saving: boolean;
+  onClose: () => void;
+  onSave: (ids: string[]) => void;
+}) {
+  const current = (ticket.assignees ?? []).map((a) => a.id);
+  const [picked, setPicked] = useState<string[]>(current);
+  const poolIds = new Set(assignable.map((m) => m.userId));
+
+  const options = [
+    ...assignable.map((m) => ({ id: m.userId, name: m.name, outside: false })),
+    ...(ticket.assignees ?? []).filter((a) => !poolIds.has(a.id)).map((a) => ({ id: a.id, name: a.name, outside: true })),
+  ];
+  const changed = picked.length !== current.length || picked.some((id) => !current.includes(id));
+  const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+
+  return (
+    <Modal open onClose={onClose} title="Assign ticket" width={460}>
+      <p className="mb-3 text-sm text-muted">
+        Choose everyone who is working on this ticket. Only members of this project can be assigned.
+      </p>
+      <div className="max-h-72 overflow-y-auto rounded-lg border border-card-border" data-testid="assign-options">
+        {options.length === 0 && <div className="p-3 text-sm text-muted">No members available.</div>}
+        {options.map((o) => (
+          <label
+            key={o.id}
+            className="flex cursor-pointer items-center gap-3 border-b border-card-border px-3 py-2 last:border-b-0 hover:bg-black/5"
+          >
+            <input
+              type="checkbox"
+              checked={picked.includes(o.id)}
+              onChange={() => toggle(o.id)}
+              data-testid={`assign-opt-${o.id}`}
+            />
+            <span className="min-w-0 flex-1 truncate">{o.id === me?.id ? `${o.name} (me)` : o.name}</span>
+            {o.outside && <span className="text-[11px] text-muted">not in project</span>}
+          </label>
+        ))}
+      </div>
+      <div className="mt-4 flex items-center justify-between gap-2">
+        <button type="button" className="btn btn-ghost btn-sm" disabled={!picked.length} onClick={() => setPicked([])}>
+          Clear all
+        </button>
+        <div className="flex gap-2">
+          <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            data-testid="assign-save"
+            disabled={!changed || saving}
+            onClick={() => onSave(picked)}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
       </div>
     </Modal>
   );

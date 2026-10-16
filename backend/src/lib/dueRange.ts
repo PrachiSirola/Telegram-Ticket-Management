@@ -3,22 +3,10 @@ import { dueDateFilter, isValidYmd, resolveWorkRange, WORK_RANGES, type WorkRang
 type Query = Record<string, unknown>;
 const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
 
-/**
- * The due-date filter shared by every ticket list (project tickets, Dashboard → My Tickets).
- *
- * Accepts the same vocabulary as "My Work":
- *   range = all | today | last_24h | last_3d | last_7d | last_1m | last_1y | custom
- *   from / to = yyyy-mm-dd, used when range = custom (either may be left out)
- * and, for older clients, the previous single-day `dueDate` and the `dueFrom`/`dueTo` pair
- * (both are treated as a custom range).
- *
- * Presets are resolved in the ORGANISATION's timezone. Due dates are stored as midnight-UTC of the
- * picked day, so they are matched by calendar day (see dueDateFilter).
- */
 export function parseDueRange(
   query: Query,
   timeZone: string | undefined,
-): { ok: true; where: { dueDate?: { gte?: Date; lt?: Date } }; range: WorkRange } | { ok: false; error: string } {
+): { ok: true; where: { dueDate?: { $gte?: Date; $lt?: Date } }; range: WorkRange } | { ok: false; error: string } {
   let range: WorkRange = "all";
   let from: string | undefined;
   let to: string | undefined;

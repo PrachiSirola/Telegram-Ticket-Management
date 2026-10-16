@@ -1,4 +1,4 @@
-import type { OrgMembership, OrgRole, User } from "@prisma/client";
+import type { OrgMembership, OrgRole, User } from "../db/types.js";
 export type AuthUser = User & { memberships: OrgMembership[] };
 export function orgRole(user: AuthUser, orgId: string): OrgRole | null {
   return user.memberships.find((m) => m.orgId === orgId)?.role ?? null;

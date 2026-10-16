@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
 import multer from "multer";
-import { prisma } from "../prisma.js";
+import { db, deleteAttachmentsWhere, withTransaction } from "../db/index.js";
+import type { Attachment } from "../db/types.js";
 import { env } from "../env.js";
 import { requireAuth } from "../middleware/auth.js";
 import { canAccessOrg, isAdminOrAbove, isInternal } from "../lib/access.js";
-import { loadTicketForUser, rejectIfArchived, userCanAccessTicket } from "../lib/ticketAccess.js";
+import { loadTicketForUser, loadTicketWithProject, rejectIfArchived, userCanAccessTicket } from "../lib/ticketAccess.js";
 import { deleteFile, resolveStoredPath, saveFile } from "../lib/storage.js";
 import {
   checkUpload,
@@ -16,13 +17,15 @@ import {
 } from "../lib/fileValidation.js";
 import {
   ATTACHMENT_VISIBILITIES,
-  attachmentVisibleWhere,
+  attachmentVisibleFilter,
   canSeeAttachment,
   parseIdList,
   projectMemberPool,
   type AttVisibility,
 } from "../lib/attachmentAccess.js";
 import { logActivity } from "../lib/activity.js";
+import { and } from "../lib/mongoFilters.js";
+import { usersById } from "../lib/hydrate.js";
 
 const MAX_BYTES = env.maxUploadMb * 1024 * 1024;
 const MAX_FILES_PER_COMMENT = 10;
@@ -57,20 +60,6 @@ function handleUpload(req: Request, res: Response, next: NextFunction) {
   });
 }
 
-const select = {
-  id: true,
-  ticketId: true,
-  commentId: true,
-  filename: true,
-  mimeType: true,
-  size: true,
-  visibility: true,
-  createdAt: true,
-  uploaderId: true,
-  uploader: { select: { id: true, name: true } },
-  access: { select: { userId: true, user: { select: { id: true, name: true } } } },
-} as const;
-
 type Row = {
   id: string;
   ticketId: string;
@@ -84,6 +73,31 @@ type Row = {
   uploader: { id: string; name: string };
   access: { userId: string; user: { id: string; name: string } }[];
 };
+
+async function hydrateAttachments(rows: Attachment[]): Promise<(Row & { storageKey: string })[]> {
+  if (rows.length === 0) return [];
+  const access = await db.attachmentAccess.find(
+    { attachmentId: { $in: rows.map((r) => r.id) } },
+    { sort: { createdAt: 1, _id: 1 } },
+  );
+  const users = await usersById([...rows.map((r) => r.uploaderId), ...access.map((a) => a.userId)]);
+  const person = (id: string) => ({ id, name: users.get(id)?.name ?? "" });
+  return rows.map((r) => ({
+    id: r.id,
+    ticketId: r.ticketId,
+    commentId: r.commentId,
+    filename: r.filename,
+    mimeType: r.mimeType,
+    size: r.size,
+    visibility: r.visibility,
+    createdAt: r.createdAt,
+    uploaderId: r.uploaderId,
+    storageKey: r.storageKey,
+    uploader: person(r.uploaderId),
+    access: access.filter((a) => a.attachmentId === r.id).map((a) => ({ userId: a.userId, user: person(a.userId) })),
+  }));
+}
+const hydrateOne = async (r: Attachment) => (await hydrateAttachments([r]))[0];
 
 const isPreviewable = (mime: string) =>
   Object.values(FILE_KINDS).some((k) => k.mime === mime && k.previewable);
@@ -149,15 +163,11 @@ attachmentsRouter.get("/", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
   const orgId = ticket.project.orgId;
-  const rows = await prisma.attachment.findMany({
-    where: {
-      ticketId: ticket.id,
-      commentId: null,
-      ...attachmentVisibleWhere(req.user!, orgId),
-    },
-    select,
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-  });
+  const found = await db.attachments.find(
+    and({ ticketId: ticket.id, commentId: null }, await attachmentVisibleFilter(req.user!, orgId)),
+    { sort: { createdAt: -1, _id: -1 } },
+  );
+  const rows = await hydrateAttachments(found);
   res.json(rows.map((r) => serializeAttachment(r as Row, req.user!, orgId, req.user!)));
 });
 attachmentsRouter.get("/members", requireAuth, async (req, res) => {
@@ -206,14 +216,14 @@ attachmentsRouter.post("/", requireAuth, handleUpload, async (req, res) => {
   const commentId =
     typeof req.body?.commentId === "string" && req.body.commentId ? req.body.commentId : null;
   if (commentId) {
-    const comment = await prisma.comment.findUnique({ where: { id: commentId } });
+    const comment = await db.comments.byId(commentId);
     if (!comment || comment.ticketId !== ticket.id) {
       return res.status(400).json({ error: "Invalid commentId" });
     }
     if (comment.authorId !== user.id) {
       return res.status(403).json({ error: "You can only attach files to your own comment." });
     }
-    const count = await prisma.attachment.count({ where: { commentId } });
+    const count = await db.attachments.count({ commentId });
     if (count + files.length > MAX_FILES_PER_COMMENT) {
       return res
         .status(400)
@@ -233,11 +243,11 @@ attachmentsRouter.post("/", requireAuth, handleUpload, async (req, res) => {
       const key = await saveFile(ticket.id, `${randomUUID()}.${check.ext}`, files[i].buffer);
       stored.push({ key, check, size: files[i].size });
     }
-    const created = await prisma.$transaction(async (tx) => {
-      const out = [];
+    const created = await withTransaction(async (tx) => {
+      const out: Attachment[] = [];
       for (const s of stored) {
-        const att = await tx.attachment.create({
-          data: {
+        const att = await db.attachments.create(
+          {
             ticketId: ticket.id,
             commentId,
             uploaderId: user.id,
@@ -246,12 +256,15 @@ attachmentsRouter.post("/", requireAuth, handleUpload, async (req, res) => {
             size: s.size,
             storageKey: s.key,
             visibility,
-            access: selected.length
-              ? { create: selected.map((userId) => ({ userId })) }
-              : undefined,
           },
-          select,
-        });
+          { session: tx },
+        );
+        if (selected.length) {
+          await db.attachmentAccess.createMany(
+            selected.map((userId) => ({ attachmentId: att.id, userId })),
+            { session: tx },
+          );
+        }
         await logActivity(tx, {
           ticketId: ticket.id,
           actorId: user.id,
@@ -265,9 +278,8 @@ attachmentsRouter.post("/", requireAuth, handleUpload, async (req, res) => {
       }
       return out;
     });
-    res
-      .status(201)
-      .json(created.map((r) => serializeAttachment(r as Row, user, orgId, user)));
+    const rows = await hydrateAttachments(created);
+    res.status(201).json(rows.map((r) => serializeAttachment(r, user, orgId, user)));
   } catch (e) {
     for (const s of stored) await deleteFile(s.key);
     throw e;
@@ -276,13 +288,9 @@ attachmentsRouter.post("/", requireAuth, handleUpload, async (req, res) => {
 
 export const attachmentFileRouter = Router();
 async function loadAttachmentForUser(req: Request, res: Response) {
-  const att = await prisma.attachment.findUnique({
-    where: { id: req.params.attId },
-    select: { ...select, storageKey: true },
-  });
-  const ticket = att
-    ? await prisma.ticket.findUnique({ where: { id: att.ticketId }, include: { project: true } })
-    : null;
+  const raw = await db.attachments.byId(req.params.attId);
+  const att = raw ? await hydrateOne(raw) : null;
+  const ticket = att ? await loadTicketWithProject(att.ticketId) : null;
   const user = req.user!;
   if (!att || !ticket || !canAccessOrg(user, ticket.project.orgId)) {
     res.status(404).json({ error: "Not found" });
@@ -349,18 +357,15 @@ attachmentFileRouter.patch("/:attId", requireAuth, async (req, res) => {
     return res.json(serializeAttachment(att, user, orgId, user));
   }
 
-  const updated = await prisma.$transaction(async (tx) => {
-    await tx.attachmentAccess.deleteMany({ where: { attachmentId: att.id } });
-    const row = await tx.attachment.update({
-      where: { id: att.id },
-      data: {
-        visibility: v.visibility,
-        access: v.selected.length
-          ? { create: v.selected.map((userId) => ({ userId })) }
-          : undefined,
-      },
-      select,
-    });
+  const updated = await withTransaction(async (tx) => {
+    await db.attachmentAccess.deleteMany({ attachmentId: att.id }, { session: tx });
+    const row = await db.attachments.mustUpdate({ _id: att.id }, { visibility: v.visibility }, { session: tx });
+    if (v.selected.length) {
+      await db.attachmentAccess.createMany(
+        v.selected.map((userId) => ({ attachmentId: att.id, userId })),
+        { session: tx },
+      );
+    }
     await logActivity(tx, {
       ticketId: ticket.id,
       actorId: user.id,
@@ -378,7 +383,7 @@ attachmentFileRouter.patch("/:attId", requireAuth, async (req, res) => {
     });
     return row;
   });
-  res.json(serializeAttachment(updated as Row, user, orgId, user));
+  res.json(serializeAttachment(await hydrateOne(updated), user, orgId, user));
 });
 
 attachmentFileRouter.delete("/:attId", requireAuth, async (req, res) => {
@@ -390,8 +395,8 @@ attachmentFileRouter.delete("/:attId", requireAuth, async (req, res) => {
   if (att.uploaderId !== user.id && !isInternal(user, orgId)) {
     return res.status(403).json({ error: "You can't delete this attachment." });
   }
-  await prisma.$transaction(async (tx) => {
-    await tx.attachment.delete({ where: { id: att.id } });
+  await withTransaction(async (tx) => {
+    await deleteAttachmentsWhere({ _id: att.id }, { session: tx });
     await logActivity(tx, {
       ticketId: ticket.id,
       actorId: user.id,

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../prisma.js";
+import { db, deleteMembershipCascade, deleteOrganizationCascade, withTransaction } from "../db/index.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireOrgRole } from "../middleware/org.js";
 import { isOrgSA, orgRole, canCreateOrganisation } from "../lib/access.js";
@@ -13,9 +13,10 @@ import {
 import { orgCreationVerifyEmail, sendEmail } from "../lib/email.js";
 import { env } from "../env.js";
 import { confirmed } from "../lib/confirmName.js";
-
-const OPEN_STATUSES: Array<"OPEN" | "IN_PROGRESS"> = ["OPEN", "IN_PROGRESS"];
-import { paginate, parsePageParams, TICKET_TIEBREAK } from "../lib/pagination.js";
+import { deleteTicketFiles } from "../lib/storage.js";
+import { contains, OPEN_STATUSES } from "../lib/mongoFilters.js";
+import { hydrateTickets } from "../lib/hydrate.js";
+import { paginate, parsePageParams } from "../lib/pagination.js";
 
 export const orgsRouter = Router();
 function mask(secret: string | null): string | null {
@@ -41,11 +42,10 @@ function serializeOrg(org: {
 }
 orgsRouter.get("/", requireAuth, async (req, res) => {
   const user = req.user!;
-  const orgs = await prisma.organization.findMany({
-    where: { id: { in: user.memberships.map((m) => m.orgId) } },
-    orderBy: { name: "asc" },
-    select: { id: true, name: true, timezone: true },
-  });
+  const orgs = await db.orgs.find(
+    { _id: { $in: user.memberships.map((m) => m.orgId) } },
+    { sort: { name: 1 }, ci: true },
+  );
   res.json(
     orgs.map((o) => ({ id: o.id, name: o.name, timezone: o.timezone, role: orgRole(user, o.id) })),
   );
@@ -108,7 +108,7 @@ orgsRouter.get(
   requireOrgAccess,
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
   async (req, res) => {
-    const org = await prisma.organization.findUniqueOrThrow({ where: { id: req.params.orgId } });
+    const org = await db.orgs.mustById(req.params.orgId);
     res.json(serializeOrg(org));
   },
 );
@@ -128,17 +128,15 @@ orgsRouter.patch(
     if (b.timezone !== undefined && !isOrgSA(req.user!, req.params.orgId)) {
       return res.status(403).json({ error: "Only the Super Admin can change the organisation timezone" });
     }
-    const org = await prisma.organization.update({
-      where: { id: req.params.orgId },
-      data: {
+    const org = await db.orgs.mustUpdate(
+      { _id: req.params.orgId },
+      {
         ...(b.name !== undefined ? { name: b.name.trim() } : {}),
         ...(b.timezone !== undefined ? { timezone: b.timezone } : {}),
-        ...(b.telegramBotToken !== undefined
-          ? { telegramBotToken: b.telegramBotToken || null }
-          : {}),
+        ...(b.telegramBotToken !== undefined ? { telegramBotToken: b.telegramBotToken || null } : {}),
         ...(b.telegramChatId !== undefined ? { telegramChatId: b.telegramChatId || null } : {}),
       },
-    });
+    );
     res.json(serializeOrg(org));
   },
 );
@@ -149,7 +147,11 @@ orgsRouter.delete(
   requireOrgAccess,
   requireOrgRole("SUPER_ADMIN"),
   async (req, res) => {
-    await prisma.organization.delete({ where: { id: req.params.orgId } });
+    const orgId = req.params.orgId;
+    const projectIds = await db.projects.distinct("_id", { orgId });
+    const ticketIds = projectIds.length ? await db.tickets.distinct("_id", { projectId: { $in: projectIds } }) : [];
+    await withTransaction((session) => deleteOrganizationCascade(orgId, { session }));
+    for (const id of ticketIds) await deleteTicketFiles(id);
     res.json({ ok: true });
   },
 );
@@ -164,22 +166,14 @@ orgsRouter.post(
     const parsed = transferSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "userId is required" });
     const orgId = req.params.orgId;
-    const target = await prisma.orgMembership.findUnique({
-      where: { userId_orgId: { userId: parsed.data.userId, orgId } },
-    });
+    const target = await db.memberships.findOne({ userId: parsed.data.userId, orgId });
     if (!target || target.disabled || target.role !== "ADMIN") {
       return res.status(400).json({ error: "Ownership can only be transferred to an active Admin" });
     }
-    await prisma.$transaction([
-      prisma.orgMembership.update({
-        where: { userId_orgId: { userId: req.user!.id, orgId } },
-        data: { role: "ADMIN" },
-      }),
-      prisma.orgMembership.update({
-        where: { id: target.id },
-        data: { role: "SUPER_ADMIN" },
-      }),
-    ]);
+    await withTransaction(async (session) => {
+      await db.memberships.mustUpdate({ userId: req.user!.id, orgId }, { role: "ADMIN" }, { session });
+      await db.memberships.mustUpdate({ _id: target.id }, { role: "SUPER_ADMIN" }, { session });
+    });
     res.json({ ok: true });
   },
 );
@@ -191,42 +185,44 @@ orgsRouter.get(
   requireAuth,
   requireOrgAccess,
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
-    async (req, res) => {
+  async (req, res) => {
+    const orgId = req.params.orgId;
     const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-    const where = {
-      orgId: req.params.orgId,
-      ...(q
-        ? {
-            user: {
-              OR: [
-                { name: { contains: q, mode: "insensitive" as const } },
-                { email: { contains: q, mode: "insensitive" as const } },
-              ],
-            },
-          }
-        : {}),
+    const where: Record<string, unknown> = { orgId };
+    if (q) {
+      const users = await db.users.find({ $or: [{ name: contains(q) }, { email: contains(q) }] }, { select: ["id"] });
+      where.userId = { $in: users.map((u) => u.id) };
+    }
+    const sort = { disabled: 1, createdAt: 1, _id: 1 } as const;
+
+    const serializeMembers = async (rows: Awaited<ReturnType<typeof db.memberships.find>>) => {
+      const [users, links] = await Promise.all([
+        db.users.find({ _id: { $in: rows.map((m) => m.userId) } }),
+        db.projectClients.find({ membershipId: { $in: rows.map((m) => m.id) } }),
+      ]);
+      const userById = new Map(users.map((u) => [u.id, u]));
+      return rows.flatMap((m) => {
+        const u = userById.get(m.userId);
+        if (!u) return [];
+        return [
+          {
+            membershipId: m.id,
+            userId: u.id,
+            name: u.name,
+            email: u.email,
+            avatarUrl: u.avatarUrl,
+            role: m.role,
+            disabled: m.disabled,
+            projectIds: links.filter((l) => l.membershipId === m.id).map((l) => l.projectId),
+            createdAt: m.createdAt,
+          },
+        ];
+      });
     };
-    const include = {
-      user: { select: { id: true, name: true, email: true, avatarUrl: true } },
-      projectAccess: { select: { projectId: true } },
-    };
-    const orderBy = [{ disabled: "asc" as const }, { createdAt: "asc" as const }];
-    const serializeMember = (m: any) => ({
-      membershipId: m.id,
-      userId: m.user.id,
-      name: m.user.name,
-      email: m.user.email,
-      avatarUrl: m.user.avatarUrl,
-      role: m.role,
-      disabled: m.disabled,
-      projectIds: m.projectAccess.map((p: { projectId: string }) => p.projectId),
-      createdAt: m.createdAt,
-    });
 
     const pageRaw = req.query.page;
     if (pageRaw === undefined) {
-      const members = await prisma.orgMembership.findMany({ where, include, orderBy });
-      return res.json(members.map(serializeMember));
+      return res.json(await serializeMembers(await db.memberships.find(where, { sort })));
     }
 
     const page = Math.max(1, parseInt(String(pageRaw), 10) || 1);
@@ -234,17 +230,11 @@ orgsRouter.get(
       MEMBERS_MAX_PAGE_SIZE,
       Math.max(1, parseInt(String(req.query.pageSize ?? "10"), 10) || 10),
     );
-    const [items, total] = await prisma.$transaction([
-      prisma.orgMembership.findMany({
-        where,
-        include,
-        orderBy,
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-      }),
-      prisma.orgMembership.count({ where }),
+    const [rows, total] = await Promise.all([
+      db.memberships.find(where, { sort, skip: (page - 1) * pageSize, limit: pageSize }),
+      db.memberships.count(where),
     ]);
-    res.json({ items: items.map(serializeMember), total, page, pageSize });
+    res.json({ items: await serializeMembers(rows), total, page, pageSize });
   },
 );
 
@@ -256,12 +246,6 @@ const memberTicketFilterSchema = z.object({
   type: z.preprocess(emptyToUndef, z.enum(["BUG", "FEATURE", "TASK"]).optional()),
 });
 
-const ticketUserSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
-const memberTicketInclude = {
-  assignee: ticketUserSelect,
-  reporter: ticketUserSelect,
-  project: { select: { id: true, name: true, orgId: true } },
-};
 function serializeMemberTicket(t: any) {
   return {
     id: t.id,
@@ -274,6 +258,7 @@ function serializeMemberTicket(t: any) {
     type: t.type,
     dueDate: t.dueDate,
     assignee: t.assignee ?? null,
+    assignees: t.assignees ?? [],
     reporter: t.reporter ?? null,
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
@@ -286,49 +271,48 @@ orgsRouter.get(
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
   async (req, res) => {
     const orgId = req.params.orgId;
-    const membership = await prisma.orgMembership.findUnique({
-      where: { userId_orgId: { userId: req.params.userId, orgId } },
-      include: { user: { select: { id: true, name: true, email: true, avatarUrl: true } } },
-    });
-    if (!membership) return res.status(404).json({ error: "Member not found" });
+    const membership = await db.memberships.findOne({ userId: req.params.userId, orgId });
+    const user = membership ? await db.users.byId(membership.userId) : null;
+    if (!membership || !user) return res.status(404).json({ error: "Member not found" });
 
+    const live = { orgId, archivedAt: null };
     const projects =
       membership.role === "SUPER_ADMIN" || membership.role === "ADMIN"
-        ? await prisma.project.findMany({ where: { orgId, archivedAt: null }, select: { id: true, name: true }, orderBy: { name: "asc" } })
-        : await prisma.project.findMany({
-            where: {
-              orgId,
-              archivedAt: null, 
-              OR: [
-                { developers: { some: { membershipId: membership.id } } },
-                { clients: { some: { membershipId: membership.id } } },
-              ],
+        ? await db.projects.find(live, { sort: { name: 1 }, ci: true, select: ["id", "name"] })
+        : await db.projects.find(
+            {
+              ...live,
+              _id: {
+                $in: [
+                  ...(await db.projectDevelopers.distinct("projectId", { membershipId: membership.id })),
+                  ...(await db.projectClients.distinct("projectId", { membershipId: membership.id })),
+                ],
+              },
             },
-            select: { id: true, name: true },
-            orderBy: { name: "asc" },
-          });
+            { sort: { name: 1 }, ci: true, select: ["id", "name"] },
+          );
 
-    const counts = await prisma.ticket.groupBy({
-      by: ["status"],
-      where: { assigneeId: membership.userId, archivedAt: null, project: { orgId, archivedAt: null } },
-      _count: true,
-    });
+    const liveProjectIds = await db.projects.distinct("_id", live);
+    const counts = await db.tickets.aggregate<{ _id: string; n: number }>([
+      { $match: { assigneeIds: membership.userId, archivedAt: null, projectId: { $in: liveProjectIds } } },
+      { $group: { _id: "$status", n: { $sum: 1 } } },
+    ]);
     const ticketCounts = { OPEN: 0, IN_PROGRESS: 0, DONE: 0 };
     let total = 0;
     for (const c of counts) {
-      ticketCounts[c.status as keyof typeof ticketCounts] = c._count;
-      total += c._count;
+      ticketCounts[c._id as keyof typeof ticketCounts] = c.n;
+      total += c.n;
     }
 
     res.json({
-      userId: membership.user.id,
-      name: membership.user.name,
-      email: membership.user.email,
-      avatarUrl: membership.user.avatarUrl,
+      userId: user.id,
+      name: user.name,
+      email: user.email,
+      avatarUrl: user.avatarUrl,
       role: membership.role,
       disabled: membership.disabled,
       createdAt: membership.createdAt,
-      projects,
+      projects: projects.map((p) => ({ id: p.id, name: p.name })),
       ticketCounts: { ...ticketCounts, total },
     });
   },
@@ -345,34 +329,27 @@ orgsRouter.get(
     if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
     const { status, priority, type } = filters.data;
 
+    const liveProjectIds = await db.projects.distinct("_id", { orgId, archivedAt: null });
     const where = {
-      assigneeId: req.params.userId,
+      assigneeIds: req.params.userId,
       archivedAt: null,
-      project: { orgId, archivedAt: null },
+      projectId: { $in: liveProjectIds },
       ...(status ? { status } : {}),
       ...(priority ? { priority } : {}),
       ...(type ? { type } : {}),
     };
     const paged = await paginate(
       parsePageParams(req.query, 10),
-      () => prisma.ticket.count({ where }),
-      (skip, take) =>
-        prisma.ticket.findMany({
-          where,
-          include: memberTicketInclude,
-          orderBy: [{ updatedAt: "desc" }, TICKET_TIEBREAK],
-          skip,
-          take,
-        }),
+      () => db.tickets.count(where),
+      async (skip, take) =>
+        hydrateTickets(await db.tickets.find(where, { sort: { updatedAt: -1, _id: -1 }, skip, limit: take })),
     );
     res.json({ ...paged, items: paged.items.map(serializeMemberTicket) });
   },
 );
 async function loadManagedMember(req: any, res: any) {
   const orgId = req.params.orgId;
-  const target = await prisma.orgMembership.findUnique({
-    where: { userId_orgId: { userId: req.params.userId, orgId } },
-  });
+  const target = await db.memberships.findOne({ userId: req.params.userId, orgId });
   if (!target) {
     res.status(404).json({ error: "Member not found" });
     return null;
@@ -413,15 +390,12 @@ orgsRouter.patch(
     }
 
     if (parsed.data.disabled === true) {
-      const u = await prisma.user.findUniqueOrThrow({ where: { id: target.userId }, select: { name: true } });
+      const u = await db.users.mustById(target.userId);
       if (!confirmed(req.body?.confirmName, u.name)) {
         return res.status(400).json({ error: "Type the member's name to confirm disabling their account." });
       }
     }
-    const updated = await prisma.orgMembership.update({
-      where: { id: target.id },
-      data: parsed.data,
-    });
+    const updated = await db.memberships.mustUpdate({ _id: target.id }, parsed.data);
     res.json({ ok: true, role: updated.role, disabled: updated.disabled });
   },
 );
@@ -435,11 +409,15 @@ orgsRouter.get(
   async (req, res) => {
     const target = await loadManagedMember(req, res);
     if (!target) return;
+    const orgProjectIds = await db.projects.distinct("_id", { orgId: req.params.orgId });
     const [developerProjects, clientProjects, openAssigned] = await Promise.all([
-      prisma.projectDeveloper.count({ where: { membershipId: target.id } }),
-      prisma.projectClient.count({ where: { membershipId: target.id } }),
-      prisma.ticket.count({
-        where: { assigneeId: target.userId, archivedAt: null, status: { in: OPEN_STATUSES }, project: { orgId: req.params.orgId } },
+      db.projectDevelopers.count({ membershipId: target.id }),
+      db.projectClients.count({ membershipId: target.id }),
+      db.tickets.count({
+        assigneeIds: target.userId,
+        archivedAt: null,
+        status: { $in: [...OPEN_STATUSES] },
+        projectId: { $in: orgProjectIds },
       }),
     ]);
     res.json({ projects: developerProjects + clientProjects, openAssignedTickets: openAssigned });
@@ -455,11 +433,11 @@ orgsRouter.delete(
   async (req, res) => {
     const target = await loadManagedMember(req, res);
     if (!target) return;
-    const u = await prisma.user.findUniqueOrThrow({ where: { id: target.userId }, select: { name: true } });
+    const u = await db.users.mustById(target.userId);
     if (!confirmed(req.body?.confirmName, u.name)) {
       return res.status(400).json({ error: "Type the member's name to confirm removing them." });
     }
-    await prisma.orgMembership.delete({ where: { id: target.id } });
+    await withTransaction((session) => deleteMembershipCascade(target.id, { session }));
     res.json({ ok: true });
   },
 );

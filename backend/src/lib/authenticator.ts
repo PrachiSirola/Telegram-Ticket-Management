@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
 import { env } from "../env.js";
 
 const ISSUER = "Ticket Management";
@@ -91,7 +91,7 @@ export function base32Decode(str: string): Buffer {
   return Buffer.from(out);
 }
 
-export const generateTotpSecret = () => base32Encode(randomBytes(20)); // 160 bits, as RFC 4226 recommends
+export const generateTotpSecret = () => base32Encode(randomBytes(20));
 export const currentStep = (now = Date.now()) => Math.floor(now / 1000 / STEP_SECONDS);
 
 export function totpAt(secretBase32: string, step: number): string {
@@ -120,10 +120,7 @@ export function otpauthUrl(email: string, secretBase32: string): string {
   return `otpauth://totp/${label}?secret=${secretBase32}&issuer=${encodeURIComponent(ISSUER)}&algorithm=SHA1&digits=${DIGITS}&period=${STEP_SECONDS}`;
 }
 export async function authenticatorStatus(userId: string) {
-  const u = await prisma.user.findUniqueOrThrow({
-    where: { id: userId },
-    select: { totpEnabledAt: true, pinHash: true, twoFactorEnabled: true },
-  });
+  const u = await db.users.mustById(userId);
   return {
     configured: authenticatorConfigured(),
     enabled: Boolean(u.totpEnabledAt),
@@ -134,19 +131,16 @@ export async function authenticatorStatus(userId: string) {
 }
 
 export async function beginEnrollment(userId: string) {
-  const u = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const u = await db.users.mustById(userId);
   if (!u.pinHash) throw new AuthenticatorStateError("Register a passkey first — the authenticator is a backup for it.");
   if (u.totpEnabledAt) throw new AuthenticatorStateError("An authenticator is already set up. Disable it first to set up a new one.");
   const secret = generateTotpSecret();
-  await prisma.user.update({
-    where: { id: userId },
-    data: { totpPendingSecretEnc: encryptSecret(secret), totpPendingAt: new Date() },
-  });
+  await db.users.mustUpdate({ _id: userId }, { totpPendingSecretEnc: encryptSecret(secret), totpPendingAt: new Date() });
   return { secret, otpauthUrl: otpauthUrl(u.email, secret) };
 }
 
 export async function confirmEnrollment(userId: string, code: string): Promise<void> {
-  const u = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const u = await db.users.mustById(userId);
   if (u.totpEnabledAt) throw new AuthenticatorStateError("An authenticator is already set up.");
   if (!u.totpPendingSecretEnc || !u.totpPendingAt || Date.now() - u.totpPendingAt.getTime() > PENDING_TTL_MS) {
     throw new AuthenticatorStateError("This setup expired. Start again to get a new QR code.");
@@ -154,48 +148,46 @@ export async function confirmEnrollment(userId: string, code: string): Promise<v
   const secret = decryptSecret(u.totpPendingSecretEnc);
   const step = matchTotp(secret, code.trim(), null);
   if (step === null) throw new InvalidCodeError("That code didn't match. Check your authenticator app and try again.");
-  await prisma.user.update({
-      where: { id: userId },
-      data: {
-        totpSecretEnc: u.totpPendingSecretEnc,
-        totpEnabledAt: new Date(),
-        totpPendingSecretEnc: null,
-        totpPendingAt: null,
-        totpLastStep: step,
-        totpAttempts: 0,
-        totpLockedUntil: null,
-      },
-  });
+  await db.users.mustUpdate(
+    { _id: userId },
+    {
+      totpSecretEnc: u.totpPendingSecretEnc,
+      totpEnabledAt: new Date(),
+      totpPendingSecretEnc: null,
+      totpPendingAt: null,
+      totpLastStep: step,
+      totpAttempts: 0,
+      totpLockedUntil: null,
+    },
+  );
 }
 
 export async function disableAuthenticator(userId: string): Promise<void> {
-  await prisma.$transaction(async (tx) => {
-    await tx.user.update({
-      where: { id: userId },
-      data: {
-        totpSecretEnc: null, totpEnabledAt: null, totpPendingSecretEnc: null, totpPendingAt: null,
-        totpLastStep: null, totpAttempts: 0, totpLockedUntil: null,
-      },
-    });
-  });
+  await db.users.mustUpdate(
+    { _id: userId },
+    {
+      totpSecretEnc: null, totpEnabledAt: null, totpPendingSecretEnc: null, totpPendingAt: null,
+      totpLastStep: null, totpAttempts: 0, totpLockedUntil: null,
+    },
+  );
 }
 
 async function failAttempt(userId: string, attempts: number): Promise<never> {
   const next = attempts + 1;
   const locked = next >= MAX_ATTEMPTS;
-  await prisma.user.update({
-    where: { id: userId },
-    data: { totpAttempts: locked ? 0 : next, totpLockedUntil: locked ? new Date(Date.now() + LOCKOUT_MS) : null },
-  });
+  await db.users.mustUpdate(
+    { _id: userId },
+    { totpAttempts: locked ? 0 : next, totpLockedUntil: locked ? new Date(Date.now() + LOCKOUT_MS) : null },
+  );
   throw locked ? new CodeLockedError() : new InvalidCodeError();
 }
 async function loadForVerify(userId: string) {
-  const u = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const u = await db.users.mustById(userId);
   if (u.totpLockedUntil && u.totpLockedUntil > new Date()) throw new CodeLockedError();
   return u;
 }
 async function succeed(userId: string, attempts: number) {
-  if (attempts !== 0) await prisma.user.update({ where: { id: userId }, data: { totpAttempts: 0, totpLockedUntil: null } });
+  if (attempts !== 0) await db.users.mustUpdate({ _id: userId }, { totpAttempts: 0, totpLockedUntil: null });
 }
 
 export async function verifyAuthenticatorCode(userId: string, code: string): Promise<void> {
@@ -203,10 +195,11 @@ export async function verifyAuthenticatorCode(userId: string, code: string): Pro
   if (!u.totpEnabledAt || !u.totpSecretEnc) return failAttempt(userId, u.totpAttempts); // not enrolled: same answer as a wrong code
   const step = matchTotp(decryptSecret(u.totpSecretEnc), code.trim(), u.totpLastStep);
   if (step === null) return failAttempt(userId, u.totpAttempts);
-  const claimed = await prisma.user.updateMany({
-    where: { id: userId, OR: [{ totpLastStep: null }, { totpLastStep: { lt: step } }] },
-    data: { totpLastStep: step },
-  });
-  if (claimed.count !== 1) return failAttempt(userId, u.totpAttempts);
+  // Atomic claim: only one request can consume a given 30s step, so a code can't be replayed.
+  const claimed = await db.users.updateMany(
+    { _id: userId, $or: [{ totpLastStep: null }, { totpLastStep: { $lt: step } }] },
+    { totpLastStep: step },
+  );
+  if (claimed !== 1) return failAttempt(userId, u.totpAttempts);
   await succeed(userId, u.totpAttempts);
 }

@@ -1,13 +1,6 @@
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
+import type { TicketActivity } from "../db/types.js";
 
-/**
- * Who assigned a ticket, taken from its activity log (ASSIGNED events that name a new assignee):
- *   assignedBy      = the person behind the LATEST assignment or reassignment — what the "Assigned By" column shows.
- *   firstAssignedBy = the person behind the ORIGINAL (first) assignment — the only one the "Assigned By" FILTER
- *                     matches, so reassignments never move a ticket to another person's filter.
- *   assignmentCount = how many assignments the ticket has had (more than 1 means it was reassigned).
- * A ticket with no assignment event (older data, or created by import) falls back to its reporter.
- */
 export interface Person { id: string; name: string }
 export interface AssignmentInfo {
   assignedBy: (Person & { at: Date | null }) | null;
@@ -15,56 +8,52 @@ export interface AssignmentInfo {
   assignmentCount: number;
 }
 
-/** Ids of tickets (of this assignee) whose "Assigned By" is `assignerId`. */
-export async function ticketIdsAssignedBy(assigneeId: string, assignerId: string): Promise<string[]> {
-  const rows = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT t."id"
-    FROM "Ticket" t
-    WHERE t."assigneeId" = ${assigneeId}
-      AND COALESCE(
-        (SELECT a."actorId" FROM "TicketActivity" a
-          WHERE a."ticketId" = t."id" AND a."type" = 'ASSIGNED'
-            AND COALESCE(a."meta"->>'toId', a."toValue") IS NOT NULL
-          ORDER BY a."createdAt" ASC, a."id" ASC LIMIT 1),
-        t."reporterId") = ${assignerId}`;
-  return rows.map((r) => r.id);
+const hasAssignee = (e: Pick<TicketActivity, "meta" | "toValue">) => Boolean((e.meta as { toId?: string } | null)?.toId ?? e.toValue);
+
+
+async function assignmentEvents(ticketIds: string[]) {
+  if (ticketIds.length === 0) return [];
+  const events = await db.activity.find(
+    { ticketId: { $in: ticketIds }, type: "ASSIGNED" },
+    { sort: { createdAt: 1, _id: 1 } },
+  );
+  return events.filter(hasAssignee);
 }
 
-/** The people who are "Assigned By" on any of these tickets (options for the filter). */
+
+async function firstAssignerByTicket(tickets: { id: string; reporterId: string }[]): Promise<Map<string, string>> {
+  const events = await assignmentEvents(tickets.map((t) => t.id));
+  const first = new Map<string, string>();
+  for (const e of events) if (!first.has(e.ticketId)) first.set(e.ticketId, e.actorId);
+  return new Map(tickets.map((t) => [t.id, first.get(t.id) ?? t.reporterId]));
+}
+
+
+export async function ticketIdsAssignedBy(assigneeId: string, assignerId: string): Promise<string[]> {
+  const tickets = await db.tickets.find({ assigneeIds: assigneeId }, { select: ["id", "reporterId"] });
+  const byTicket = await firstAssignerByTicket(tickets);
+  return tickets.filter((t) => byTicket.get(t.id) === assignerId).map((t) => t.id);
+}
+
+
 export async function listAssigners(ticketIds: string[]): Promise<Person[]> {
   if (ticketIds.length === 0) return [];
-  const rows = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT DISTINCT COALESCE(
-        (SELECT a."actorId" FROM "TicketActivity" a
-          WHERE a."ticketId" = t."id" AND a."type" = 'ASSIGNED'
-            AND COALESCE(a."meta"->>'toId', a."toValue") IS NOT NULL
-          ORDER BY a."createdAt" ASC, a."id" ASC LIMIT 1),
-        t."reporterId") AS "id"
-    FROM "Ticket" t
-    WHERE t."id" = ANY(${ticketIds})`;
-  const users = await prisma.user.findMany({
-    where: { id: { in: rows.map((r) => r.id) } },
-    select: { id: true, name: true },
-  });
-  return users.sort((a, b) => a.name.localeCompare(b.name));
+  const tickets = await db.tickets.find({ _id: { $in: ticketIds } }, { select: ["id", "reporterId"] });
+  const byTicket = await firstAssignerByTicket(tickets);
+  const users = await db.users.find({ _id: { $in: [...new Set(byTicket.values())] } });
+  return users.map((u) => ({ id: u.id, name: u.name })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Adds assignedBy / reassignedBy / reassignCount to serialized tickets (one query for the whole page). */
+
 export async function withAssignmentInfo<T extends { id: string; reporter?: { id: string; name: string } | null }>(
   items: T[],
 ): Promise<(T & AssignmentInfo)[]> {
   if (items.length === 0) return [];
-  const events = await prisma.ticketActivity.findMany({
-    where: { ticketId: { in: items.map((t) => t.id) }, type: "ASSIGNED" },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    select: { ticketId: true, createdAt: true, toValue: true, meta: true, actor: { select: { id: true, name: true } } },
-  });
+  const events = await assignmentEvents(items.map((t) => t.id));
+  const actors = new Map((await db.users.find({ _id: { $in: [...new Set(events.map((e) => e.actorId))] } })).map((u) => [u.id, u]));
   const byTicket = new Map<string, typeof events>();
-  for (const e of events) {
-    const names = (e.meta as { toId?: string } | null)?.toId ?? e.toValue;
-    if (!names) continue; // "unassigned" — nobody was assigned
-    byTicket.set(e.ticketId, [...(byTicket.get(e.ticketId) ?? []), e]);
-  }
+  for (const e of events) byTicket.set(e.ticketId, [...(byTicket.get(e.ticketId) ?? []), e]);
+  const person = (id: string): Person => ({ id, name: actors.get(id)?.name ?? "" });
   return items.map((t) => {
     const evs = byTicket.get(t.id) ?? [];
     if (evs.length === 0) {
@@ -72,6 +61,11 @@ export async function withAssignmentInfo<T extends { id: string; reporter?: { id
       return { ...t, assignedBy: r && { ...r, at: null }, firstAssignedBy: r, assignmentCount: 0 };
     }
     const first = evs[0], last = evs[evs.length - 1];
-    return { ...t, assignedBy: { ...last.actor, at: last.createdAt }, firstAssignedBy: first.actor, assignmentCount: evs.length };
+    return {
+      ...t,
+      assignedBy: { ...person(last.actorId), at: last.createdAt },
+      firstAssignedBy: person(first.actorId),
+      assignmentCount: evs.length,
+    };
   });
 }

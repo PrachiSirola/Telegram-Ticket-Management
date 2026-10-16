@@ -1,13 +1,6 @@
-import { prisma } from "../prisma.js";
+import { db, type Filter } from "../db/index.js";
+import { hydrateTickets } from "./hydrate.js";
 import { type DateWindow } from "./dateRanges.js";
-
-const userSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
-
-export const workTicketInclude = {
-  assignee: userSelect,
-  reporter: userSelect,
-  project: { select: { id: true, name: true, orgId: true } },
-};
 
 export function serializeTicket(t: any) {
   return {
@@ -23,6 +16,7 @@ export function serializeTicket(t: any) {
     dueDate: t.dueDate,
     estimate: t.estimate,
     assignee: t.assignee ?? null,
+    assignees: t.assignees ?? [],
     reporter: t.reporter ?? null,
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
@@ -32,17 +26,16 @@ export function serializeTicket(t: any) {
 export interface CompletedWorkScope {
   orgId: string;
   userId: string;
-  projectScope: Record<string, unknown>;
-  searchWhere: Record<string, unknown>;
+  projectIds: string[];
+  searchWhere: Filter;
   window: DateWindow;
 }
 async function resolveCompletionDates(ticketIds: string[]): Promise<Map<string, Date>> {
   if (ticketIds.length === 0) return new Map();
-  const rows = await prisma.ticketStatusHistory.findMany({
-    where: { ticketId: { in: ticketIds }, toStatus: "DONE" },
-    orderBy: { changedAt: "desc" },
-    select: { ticketId: true, changedAt: true },
-  });
+  const rows = await db.statusHistory.find(
+    { ticketId: { $in: ticketIds }, toStatus: "DONE" },
+    { sort: { changedAt: -1, _id: -1 }, select: ["ticketId", "changedAt"] },
+  );
   const map = new Map<string, Date>();
   for (const row of rows) {
     if (!map.has(row.ticketId)) map.set(row.ticketId, row.changedAt);
@@ -50,17 +43,15 @@ async function resolveCompletionDates(ticketIds: string[]): Promise<Map<string, 
   return map;
 }
 export async function loadCompletedInScope(scope: CompletedWorkScope) {
-  const { orgId, userId, projectScope, searchWhere, window } = scope;
-  const doneTickets = await prisma.ticket.findMany({
-    where: {
-      assigneeId: userId,
-      status: "DONE",
-      archivedAt: null,
-      project: { orgId, ...projectScope },
-      ...searchWhere,
-    } as any,
-    include: workTicketInclude,
+  const { userId, projectIds, searchWhere, window } = scope;
+  const found = await db.tickets.find({
+    assigneeIds: userId,
+    status: "DONE",
+    archivedAt: null,
+    projectId: { $in: projectIds },
+    ...searchWhere,
   });
+  const doneTickets = await hydrateTickets(found);
 
   const completionDates = await resolveCompletionDates(doneTickets.map((t) => t.id));
   const withDates = doneTickets.map((t) => ({

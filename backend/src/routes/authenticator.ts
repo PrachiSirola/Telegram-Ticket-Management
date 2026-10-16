@@ -1,7 +1,7 @@
 import { Router, type Response } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { z } from "zod";
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
 import { requireAuth } from "../middleware/auth.js";
 import { verifyPassword } from "../lib/password.js";
 import {
@@ -32,7 +32,7 @@ const passwordSchema = z.object({ currentPassword: z.string().min(1) });
 const codeSchema = z.object({ code: z.string().min(1).max(20) });
 
 async function passwordOk(userId: string, password: string): Promise<boolean> {
-  const u = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { passwordHash: true } });
+  const u = await db.users.mustById(userId);
   return verifyPassword(password, u.passwordHash);
 }
 function fail(res: Response, err: unknown) {

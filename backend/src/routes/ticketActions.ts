@@ -1,7 +1,6 @@
 import { Router } from "express";
-import type { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { prisma } from "../prisma.js";
+import { db, isDuplicateKey, withTransaction, type Filter } from "../db/index.js";
 import { requireAuth } from "../middleware/auth.js";
 import { isAdminOrAbove, isClient, isInternal } from "../lib/access.js";
 import { loadTicketForUser, rejectIfArchived } from "../lib/ticketAccess.js";
@@ -9,16 +8,11 @@ import { projectMemberPool } from "../lib/attachmentAccess.js";
 import { confirmed } from "../lib/confirmName.js";
 import { logActivity } from "../lib/activity.js";
 import { notify } from "../lib/notify.js";
+import { liteUser, usersById } from "../lib/hydrate.js";
 import { paginate, parsePageParams } from "../lib/pagination.js";
 
 
 export const ticketActionsRouter = Router({ mergeParams: true });
-
-const ticketInclude = {
-  assignee: { select: { id: true, name: true, email: true, avatarUrl: true } },
-  reporter: { select: { id: true, name: true, email: true, avatarUrl: true } },
-  project: { select: { id: true, name: true, orgId: true } },
-};
 
 const ATTACHMENT_TYPES = [
   "ATTACHMENT_ADDED",
@@ -34,31 +28,34 @@ ticketActionsRouter.get("/activity", requireAuth, async (req, res) => {
   const client = isClient(user, orgId);
   const admin = isAdminOrAbove(user, orgId);
 
-  const where: Prisma.TicketActivityWhereInput = {
+  const where: Filter = {
     ticketId: ticket.id,
     ...(client ? { internalOnly: false } : {}),
     ...(admin
       ? {}
       : {
-          NOT: {
-            type: { in: [...ATTACHMENT_TYPES] },
-            actorId: { not: user.id },
-            meta: { path: ["visibility"], equals: "SELECTED" },
-          },
+          $nor: [
+            {
+              type: { $in: [...ATTACHMENT_TYPES] },
+              actorId: { $ne: user.id },
+              "meta.visibility": "SELECTED",
+            },
+          ],
         }),
   };
-  const orderBy = [{ createdAt: "desc" as const }, { id: "desc" as const }];
   const paged = await paginate(
     parsePageParams({ page: 1, ...req.query }, 25),
-    () => prisma.ticketActivity.count({ where }),
-    (skip, take) =>
-      prisma.ticketActivity.findMany({
-        where,
-        orderBy,
-        skip,
-        take,
-        include: { actor: { select: { id: true, name: true, avatarUrl: true } } },
-      }),
+    () => db.activity.count(where),
+    async (skip, take) => {
+      const rows = await db.activity.find(where, { sort: { createdAt: -1, _id: -1 }, skip, limit: take });
+      const actors = await usersById(rows.map((r) => r.actorId));
+      return rows.map((r) => ({
+        ...r,
+        actor: actors.get(r.actorId)
+          ? { id: r.actorId, name: actors.get(r.actorId)!.name, avatarUrl: actors.get(r.actorId)!.avatarUrl }
+          : null,
+      }));
+    },
   );
   res.json({
     ...paged,
@@ -91,12 +88,9 @@ ticketActionsRouter.get("/followers", requireAuth, async (req, res) => {
   if (!isInternal(req.user!, ticket.project.orgId)) {
     return res.status(403).json({ error: "Not allowed" });
   }
-  const rows = await prisma.ticketFollower.findMany({
-    where: { ticketId: ticket.id },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    include: { user: { select: { id: true, name: true, email: true, avatarUrl: true } } },
-  });
-  res.json(rows.map((r) => ({ ...r.user, followedAt: r.createdAt })));
+  const rows = await db.followers.find({ ticketId: ticket.id }, { sort: { createdAt: 1, _id: 1 } });
+  const users = await usersById(rows.map((r) => r.userId));
+  res.json(rows.flatMap((r) => (users.get(r.userId) ? [{ ...liteUser(users.get(r.userId)!), followedAt: r.createdAt }] : [])));
 });
 
 ticketActionsRouter.post("/followers", requireAuth, async (req, res) => {
@@ -115,25 +109,26 @@ ticketActionsRouter.post("/followers", requireAuth, async (req, res) => {
   if (!target) {
     return res.status(400).json({ error: "You can only add members of this project." });
   }
-  const existing = await prisma.ticketFollower.findUnique({
-    where: { ticketId_userId: { ticketId: ticket.id, userId: targetId } },
-  });
+  const existing = await db.followers.exists({ ticketId: ticket.id, userId: targetId });
   if (existing) return res.status(409).json({ error: `${target.name} already follows this ticket.` });
 
-  await prisma.$transaction(async (tx) => {
-    await tx.ticketFollower.create({
-      data: { ticketId: ticket.id, userId: targetId, addedById: user.id },
+  try {
+    await withTransaction(async (tx) => {
+      await db.followers.create({ ticketId: ticket.id, userId: targetId, addedById: user.id }, { session: tx });
+      await logActivity(tx, {
+        ticketId: ticket.id,
+        actorId: user.id,
+        type: "FOLLOWER_ADDED",
+        field: "follower",
+        to: target.name,
+        meta: { userId: targetId },
+        internalOnly: true,
+      });
     });
-    await logActivity(tx, {
-      ticketId: ticket.id,
-      actorId: user.id,
-      type: "FOLLOWER_ADDED",
-      field: "follower",
-      to: target.name,
-      meta: { userId: targetId },
-      internalOnly: true,
-    });
-  });
+  } catch (err) {
+    if (isDuplicateKey(err)) return res.status(409).json({ error: `${target.name} already follows this ticket.` });
+    throw err;
+  }
   if (targetId !== user.id) {
     await notify({
       recipientIds: [targetId],
@@ -158,19 +153,17 @@ ticketActionsRouter.delete("/followers/:userId", requireAuth, async (req, res) =
   if (targetId !== user.id && !isAdminOrAbove(user, orgId)) {
     return res.status(403).json({ error: "You can only remove yourself." });
   }
-  const row = await prisma.ticketFollower.findUnique({
-    where: { ticketId_userId: { ticketId: ticket.id, userId: targetId } },
-    include: { user: { select: { name: true } } },
-  });
+  const row = await db.followers.findOne({ ticketId: ticket.id, userId: targetId });
+  const followerUser = row ? await db.users.byId(row.userId) : null;
   if (!row) return res.status(404).json({ error: "Not a follower" });
-  await prisma.$transaction(async (tx) => {
-    await tx.ticketFollower.delete({ where: { id: row.id } });
+  await withTransaction(async (tx) => {
+    await db.followers.deleteOne({ _id: row.id }, { session: tx });
     await logActivity(tx, {
       ticketId: ticket.id,
       actorId: user.id,
       type: "FOLLOWER_REMOVED",
       field: "follower",
-      from: row.user.name,
+      from: followerUser?.name ?? null,
       meta: { userId: targetId },
       internalOnly: true,
     });
@@ -189,9 +182,9 @@ ticketActionsRouter.post("/duplicate", requireAuth, async (req, res) => {
     return res.status(409).json({ error: "This project is archived. Restore it before adding tickets." });
   }
 
-  const copy = await prisma.$transaction(async (tx) => {
-    const created = await tx.ticket.create({
-      data: {
+  const copy = await withTransaction(async (tx) => {
+    const created = await db.tickets.create(
+      {
         projectId: ticket.projectId,
         title: `Copy of ${ticket.title}`.slice(0, 300),
         description: ticket.description,
@@ -201,10 +194,10 @@ ticketActionsRouter.post("/duplicate", requireAuth, async (req, res) => {
         estimate: ticket.estimate,
         status: "OPEN",
         reporterId: user.id,
-        assigneeId: null,
+        assigneeIds: [],
       },
-      include: ticketInclude,
-    });
+      { session: tx },
+    );
     await logActivity(tx, {
       ticketId: created.id,
       actorId: user.id,
@@ -238,17 +231,14 @@ ticketActionsRouter.post("/move", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "The ticket is already in that project." });
   }
 
-  const target = await prisma.project.findFirst({
-    where: { id: parsed.data.projectId, orgId },
-    select: { id: true, name: true, archivedAt: true },
-  });
+  const target = await db.projects.findOne({ _id: parsed.data.projectId, orgId });
   if (!target) return res.status(404).json({ error: "Project not found." });
   if (target.archivedAt) {
     return res.status(409).json({ error: "That project is archived. Restore it before moving tickets into it." });
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.ticket.update({ where: { id: ticket.id }, data: { projectId: target.id } });
+  await withTransaction(async (tx) => {
+    await db.tickets.mustUpdate({ _id: ticket.id }, { projectId: target.id }, { session: tx });
     await logActivity(tx, {
       ticketId: ticket.id,
       actorId: user.id,
@@ -259,8 +249,7 @@ ticketActionsRouter.post("/move", requireAuth, async (req, res) => {
       meta: { fromProjectId: ticket.projectId, toProjectId: target.id },
     });
   });
-  const full = await prisma.ticket.findUnique({ where: { id: ticket.id }, include: ticketInclude });
-  res.json({ id: full!.id, projectId: full!.projectId, project: full!.project });
+  res.json({ id: ticket.id, projectId: target.id, project: { id: target.id, name: target.name, orgId: target.orgId } });
 });
 
 ticketActionsRouter.post("/archive", requireAuth, async (req, res) => {
@@ -274,8 +263,8 @@ ticketActionsRouter.post("/archive", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Type the ticket's name to confirm archiving it." });
   }
   if (ticket.archivedAt) return res.status(409).json({ error: "This ticket is already archived." });
-  await prisma.$transaction(async (tx) => {
-    await tx.ticket.update({ where: { id: ticket.id }, data: { archivedAt: new Date() } });
+  await withTransaction(async (tx) => {
+    await db.tickets.mustUpdate({ _id: ticket.id }, { archivedAt: new Date() }, { session: tx });
     await logActivity(tx, { ticketId: ticket.id, actorId: user.id, type: "ARCHIVED", internalOnly: true });
   });
   res.json({ ok: true });
@@ -289,8 +278,8 @@ ticketActionsRouter.post("/restore", requireAuth, async (req, res) => {
     return res.status(403).json({ error: "Only admins can restore tickets." });
   }
   if (!ticket.archivedAt) return res.status(409).json({ error: "This ticket isn't archived." });
-  await prisma.$transaction(async (tx) => {
-    await tx.ticket.update({ where: { id: ticket.id }, data: { archivedAt: null } });
+  await withTransaction(async (tx) => {
+    await db.tickets.mustUpdate({ _id: ticket.id }, { archivedAt: null }, { session: tx });
     await logActivity(tx, { ticketId: ticket.id, actorId: user.id, type: "RESTORED", internalOnly: true });
   });
   res.json({ ok: true });

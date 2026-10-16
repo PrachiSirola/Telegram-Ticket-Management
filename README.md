@@ -2,24 +2,24 @@
 
 Multi-tenant, workspace-isolated ticket manager. See [DESIGN.md](./DESIGN.md) for the full design and roadmap.
 
-**Stack:** React + Vite + TypeScript (frontend) · Express + Prisma + PostgreSQL (backend) · Google SSO (invite-only) · in-app + email notifications.
+**Stack:** React + Vite + TypeScript (frontend) · Express + Mongoose + MongoDB (backend) · Google SSO (invite-only) · in-app + email notifications.
 
 ## Prerequisites
 
 - Node 20+
-- Docker (for PostgreSQL)
+- Docker (for MongoDB) or any MongoDB 4.0+ replica set (Atlas works)
 
 ## Quick start
 
 ```bash
-# 1. Start PostgreSQL (runs on host port 5433)
+# 1. Start MongoDB (single-node replica set on host port 27017)
 docker compose up -d
 
 # 2. Backend
 cd backend
 cp .env.example .env          # already has working dev defaults
 npm install
-npx prisma migrate dev        # create schema
+npm run db:indexes            # create collections + indexes
 npm run db:seed               # seed CEO, devs, two client workspaces, sample tickets
 npm run dev                   # http://localhost:1019
 
@@ -73,9 +73,10 @@ sidebar and shares the generated link; the invitee signs in with Google to accep
 ## Project layout
 
 ```
-backend/    Express API, Prisma schema, auth, RBAC + workspace-isolation middleware
+backend/    Express API, Mongoose models, auth, RBAC + workspace-isolation middleware
 frontend/   React SPA (auth, dashboard, workspace boards, ticket detail, notifications)
-docker-compose.yml   PostgreSQL
+docker-compose.yml   MongoDB (replica set)
+MONGODB_MIGRATION.md   Moving an existing PostgreSQL database to MongoDB
 DESIGN.md   Full design & phased plan
 ```
 

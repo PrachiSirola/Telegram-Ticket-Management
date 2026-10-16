@@ -1,11 +1,10 @@
 import type { NextFunction, Request, Response } from "express";
-import type { OrgRole, Project } from "@prisma/client";
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
+import type { OrgRole, Project } from "../db/types.js";
 import { canAccessOrg, isClient, membershipIn, orgRole } from "../lib/access.js";
 import { developerCanAccessProject } from "../lib/projectAccess.js";
 
 declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
       project?: Project;
@@ -36,15 +35,13 @@ export function requireOrgRole(...roles: OrgRole[]) {
 }
 export async function requireProjectAccess(req: Request, res: Response, next: NextFunction) {
   const { orgId, projectId } = req.params;
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  const project = await db.projects.byId(projectId);
   if (!project || project.orgId !== orgId) {
     return res.status(404).json({ error: "Project not found" });
   }
   if (isClient(req.user!, orgId)) {
     const membership = membershipIn(req.user!, orgId)!;
-    const attached = await prisma.projectClient.findUnique({
-      where: { projectId_membershipId: { projectId, membershipId: membership.id } },
-    });
+    const attached = await db.projectClients.exists({ projectId, membershipId: membership.id });
     if (!attached) return res.status(404).json({ error: "Project not found" });
   } else if (orgRole(req.user!, orgId) === "DEVELOPER") {
     const membership = membershipIn(req.user!, orgId)!;

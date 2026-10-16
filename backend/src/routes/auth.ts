@@ -3,7 +3,7 @@ import type { Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { env } from "../env.js";
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
 import {
   AccountExistsError,
   acceptInviteForUser,
@@ -156,7 +156,7 @@ authRouter.post("/2fa/forgot-pin", authLimiter, async (req, res) => {
     return res.status(401).json({ error: "Your session expired. Please log in again." });
   }
 
-  const user = await prisma.user.findUniqueOrThrow({ where: { id: payload.userId } });
+  const user = await db.users.mustById(payload.userId);
   const resetToken = await createPinResetToken(user.id);
   const resetUrl = `${env.frontendUrl}/reset-pin?token=${resetToken}`;
   const mail = pinResetEmail(user.name, resetUrl);
@@ -192,10 +192,7 @@ authRouter.post("/logout", (_req, res) => {
 
 authRouter.get("/me", requireAuth, async (req, res) => {
   const u = req.user!;
-  const orgs = await prisma.organization.findMany({
-    where: { id: { in: u.memberships.map((m) => m.orgId) } },
-    select: { id: true, name: true },
-  });
+  const orgs = await db.orgs.find({ _id: { $in: u.memberships.map((m) => m.orgId) } });
   const nameById = new Map(orgs.map((o) => [o.id, o.name]));
   res.json({
     id: u.id,

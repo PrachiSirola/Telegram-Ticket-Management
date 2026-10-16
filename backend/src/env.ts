@@ -51,8 +51,9 @@ export const env = {
   port: Number(process.env.PORT ?? 4000),
   nodeEnv: process.env.NODE_ENV ?? "development",
   isProd: (process.env.NODE_ENV ?? "development") === "production",
-
-  databaseUrl: required("DATABASE_URL"),
+  mongoUri: required("MONGODB_URI", process.env.NODE_ENV === "production" ? undefined : "mongodb://127.0.0.1:27017/ticket_mgmt?replicaSet=rs0"),
+  mongoDbName: process.env.MONGODB_DB ?? "",
+  mongoTransactions: ((process.env.MONGO_TRANSACTIONS ?? "auto").toLowerCase() as "auto" | "on" | "off"),
 
   jwtSecret: required("JWT_SECRET", "dev-secret-change-me"),
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? "tm_session",

@@ -24,7 +24,6 @@ const Q = ({ children }: { children: ReactNode }) => (
   <span className="break-words font-medium text-fg">{children}</span>
 );
 
-/** One sentence per event: "<who> <what changed>". The actor is rendered separately. */
 export function describe(a: ActivityItem): { icon: ReactNode; text: ReactNode } {
   switch (a.type) {
     case "TICKET_CREATED":
@@ -59,7 +58,7 @@ export function describe(a: ActivityItem): { icon: ReactNode; text: ReactNode } 
             <>assigned this ticket to <Q>{a.to}</Q></>
           )
         ) : (
-          <>unassigned this ticket{a.from ? <> (was {a.from})</> : null}</>
+          <>{a.from ? <>unassigned <Q>{a.from}</Q> from this ticket</> : "unassigned this ticket"}</>
         ),
       };
     case "ATTACHMENT_ADDED": {
@@ -109,7 +108,6 @@ function when(iso: string) {
   return { rel, full: d.toLocaleString() };
 }
 
-/** Read-only audit trail: who did what, and when. There is no edit/delete UI by design. */
 export function ActivityTimeline({ ticketId, internal }: { ticketId: string; internal: boolean }) {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);

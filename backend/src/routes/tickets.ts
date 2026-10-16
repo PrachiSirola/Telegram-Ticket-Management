@@ -1,22 +1,21 @@
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../prisma.js";
+import { db, deleteTicketsCascade, withTransaction } from "../db/index.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireProjectAccess } from "../middleware/org.js";
 import { isAdminOrAbove, isInternal, orgRole } from "../lib/access.js";
-import { loadTicketForUser, rejectIfArchived, userCanAccessTicket } from "../lib/ticketAccess.js";
+import { loadTicketForUser, loadTicketWithProject, rejectIfArchived, userCanAccessTicket } from "../lib/ticketAccess.js";
 import { confirmed } from "../lib/confirmName.js";
 import { deleteTicketFiles } from "../lib/storage.js";
 import { listNames, notify } from "../lib/notify.js";
 import { logActivity } from "../lib/activity.js";
 import { parseDueRange } from "../lib/dueRange.js";
 import { followerRecipients } from "../lib/followers.js";
-import {
-  paginate,
-  parsePageParams,
-  TICKET_TIEBREAK,
-  wantsPagination,
-} from "../lib/pagination.js";
+import { contains } from "../lib/mongoFilters.js";
+import { hydrateTicket, hydrateTickets } from "../lib/hydrate.js";
+import { queryTickets } from "../lib/ticketQuery.js";
+import { paginate, parsePageParams, wantsPagination } from "../lib/pagination.js";
+import { assigneeFields, diffAssignees, requestedAssignees, validateAssignees } from "../lib/assignees.js";
 
 const emptyToUndef = (v: unknown) => (v === "" ? undefined : v);
 const listFilterSchema = z.object({
@@ -52,7 +51,7 @@ export function ticketPermissions(
     changeStatus: live && internal,
     changePriority: live && internal,
     assign: live && admin,
-    selfAssign: live && internal,
+    selfAssign: live && admin,
     duplicate: admin && !projectArchived,
     addFollower: admin && !projectArchived,
     move: live && admin,
@@ -61,8 +60,6 @@ export function ticketPermissions(
     delete: admin || (orgRole(user, orgId) !== "DEVELOPER" && reporter),
   };
 }
-
-const userSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
 
 function serialize(t: any) {
   return {
@@ -80,24 +77,13 @@ function serialize(t: any) {
     dueDate: t.dueDate,
     estimate: t.estimate,
     assignee: t.assignee ?? null,
+    assignees: t.assignees ?? [],
+    assigneeIds: t.assigneeIds ?? [],
     reporter: t.reporter ?? null,
     archivedAt: t.archivedAt ?? null,
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
   };
-}
-
-const ticketInclude = {
-  assignee: userSelect,
-  reporter: userSelect,
-  project: { select: { id: true, name: true, orgId: true, archivedAt: true } },
-};
-
-async function isAssignableMember(userId: string, orgId: string) {
-  const m = await prisma.orgMembership.findUnique({
-    where: { userId_orgId: { userId, orgId } },
-  });
-  return Boolean(m && !m.disabled && m.role !== "CLIENT");
 }
 
 export const projectTicketsRouter = Router({ mergeParams: true });
@@ -111,7 +97,7 @@ projectTicketsRouter.get(
     const filters = listFilterSchema.safeParse(req.query);
     if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
     const { status, priority, type, assigneeId, q, archived } = filters.data;
-    const org = await prisma.organization.findUnique({ where: { id: req.params.orgId }, select: { timezone: true } });
+    const org = await db.orgs.byId(req.params.orgId);
     const due = parseDueRange(req.query, org?.timezone);
     if (!due.ok) return res.status(400).json({ error: due.error });
 
@@ -120,29 +106,25 @@ projectTicketsRouter.get(
     const where = {
       projectId: req.project!.id,
       ...(archivedMode === "active" ? { archivedAt: null } : {}),
-      ...(archivedMode === "archived" ? { archivedAt: { not: null } } : {}),
+      ...(archivedMode === "archived" ? { archivedAt: { $ne: null } } : {}),
       ...(status ? { status } : {}),
       ...(priority ? { priority } : {}),
       ...(type ? { type } : {}),
-      ...(assigneeId ? { assigneeId } : {}),
+      ...(assigneeId === "unassigned" ? { assigneeIds: { $size: 0 } } : assigneeId ? { assigneeIds: assigneeId } : {}),
       ...due.where,
-      ...(q ? { title: { contains: q, mode: "insensitive" as const } } : {}),
+      ...(q ? { title: contains(q) } : {}),
     };
 
-    const orderBy = [{ updatedAt: "desc" as const }, TICKET_TIEBREAK];
-
-
     if (!wantsPagination(req.query)) {
-      const tickets = await prisma.ticket.findMany({ where, include: ticketInclude, orderBy });
-      return res.json(tickets.map(serialize));
+      const tickets = await queryTickets(where, "updated");
+      return res.json((await hydrateTickets(tickets)).map(serialize));
     }
 
 
     const paged = await paginate(
       parsePageParams(req.query),
-      () => prisma.ticket.count({ where }),
-      (skip, take) =>
-        prisma.ticket.findMany({ where, include: ticketInclude, orderBy, skip, take }),
+      () => db.tickets.count(where),
+      async (skip, take) => hydrateTickets(await queryTickets(where, "updated", { skip, take })),
     );
     res.json({ ...paged, items: paged.items.map(serialize) });
   },
@@ -155,7 +137,7 @@ const createSchema = z.object({
   type: z.enum(["BUG", "FEATURE", "TASK"]).optional(),
   dueDate: z.string().datetime().nullish(),
   estimate: z.number().positive().nullish(),
-  assigneeId: z.string().nullish(),
+  ...assigneeFields,
   mentions: z.array(z.string()).optional(),
 });
 
@@ -176,20 +158,20 @@ projectTicketsRouter.post(
     }
 
 
-    let assigneeId: string | null = null;
-    if (data.assigneeId) {
+    let assigneeIds: string[] = [];
+    const requested = requestedAssignees(data);
+    if (requested?.length) {
       if (!isAdminOrAbove(user, orgId)) {
         return res.status(403).json({ error: "Only admins can assign on create" });
       }
-      if (!(await isAssignableMember(data.assigneeId, orgId))) {
-        return res.status(400).json({ error: "Assignee must be an internal org member" });
-      }
-      assigneeId = data.assigneeId;
+      const check = await validateAssignees(requested, orgId, projectId, []);
+      if (!check.ok) return res.status(400).json({ error: check.error });
+      assigneeIds = check.ids;
     }
 
-    const ticket = await prisma.$transaction(async (tx) => {
-      const created = await tx.ticket.create({
-        data: {
+    const ticket = await withTransaction(async (tx) => {
+      const row = await db.tickets.create(
+        {
           projectId,
           title: data.title,
           description: data.description ?? "",
@@ -198,25 +180,26 @@ projectTicketsRouter.post(
           dueDate: data.dueDate ? new Date(data.dueDate) : null,
           estimate: data.estimate ?? null,
           reporterId: user.id,
-          assigneeId,
+          assigneeIds,
         },
-        include: ticketInclude,
-      });
+        { session: tx },
+      );
+      const created = await hydrateTicket(row, tx);
       await logActivity(tx, {
         ticketId: created.id,
         actorId: user.id,
         type: "TICKET_CREATED",
         to: created.title,
       });
-      if (assigneeId) {
+      for (const a of created.assignees) {
         await logActivity(tx, {
           ticketId: created.id,
           actorId: user.id,
           type: "ASSIGNED",
           field: "assignee",
           from: null,
-          to: created.assignee?.name ?? null,
-          meta: { toId: assigneeId },
+          to: a.name,
+          meta: { toId: a.id },
         });
       }
       return created;
@@ -235,12 +218,12 @@ projectTicketsRouter.post(
         `🆕 <b>New ticket</b>: ${ticket.title}\n` +
         `Project: ${req.project!.name}\n` +
         `Priority: ${ticket.priority} · Type: ${ticket.type}\n` +
-        `Assigned: ${ticket.assignee?.name ?? "Unassigned"}`,
+        `Assigned: ${ticket.assignees.length ? ticket.assignees.map((a) => a.name).join(", ") : "Unassigned"}`,
     });
 
-    if (assigneeId) {
+    if (assigneeIds.length) {
       await notify({
-        recipientIds: [assigneeId],
+        recipientIds: assigneeIds,
         type: "ASSIGNED",
         ticket,
         orgId,
@@ -251,10 +234,7 @@ projectTicketsRouter.post(
 
 
     if (data.mentions?.length) {
-      const mentioned = await prisma.user.findMany({
-        where: { id: { in: data.mentions } },
-        select: { id: true, name: true },
-      });
+      const mentioned = await db.users.find({ _id: { $in: data.mentions } });
       if (mentioned.length) {
         await notify({
           recipientIds: mentioned.map((u) => u.id),
@@ -294,7 +274,7 @@ ticketsRouter.post("/bulk-status", requireAuth, async (req, res) => {
 
   for (const id of ids) {
     try {
-      const ticket = await prisma.ticket.findUnique({ where: { id }, include: { project: true } });
+      const ticket = await loadTicketWithProject(id);
 
       if (!ticket || !(await userCanAccessTicket(user, ticket))) {
         failed.push({ id, title: null, reason: "Ticket not found" });
@@ -318,11 +298,12 @@ ticketsRouter.post("/bulk-status", requireAuth, async (req, res) => {
         continue;
       }
 
-      const row = await prisma.$transaction(async (tx) => {
-        const r = await tx.ticket.update({ where: { id }, data: { status }, include: ticketInclude });
-        await tx.ticketStatusHistory.create({
-          data: { ticketId: id, fromStatus: ticket.status, toStatus: status, changedById: user.id },
-        });
+      const row = await withTransaction(async (tx) => {
+        const r = await hydrateTicket(await db.tickets.mustUpdate({ _id: id }, { status }, { session: tx }), tx);
+        await db.statusHistory.create(
+          { ticketId: id, fromStatus: ticket.status, toStatus: status, changedById: user.id },
+          { session: tx },
+        );
         await logActivity(tx, {
           ticketId: id,
           actorId: user.id,
@@ -339,7 +320,7 @@ ticketsRouter.post("/bulk-status", requireAuth, async (req, res) => {
       try {
         const followers = await followerRecipients(id, orgId, ticket.projectId, { customerVisible: true });
         await notify({
-          recipientIds: [ticket.reporterId, ticket.assigneeId ?? "", ...followers].filter(Boolean),
+          recipientIds: [ticket.reporterId, ...ticket.assigneeIds, ...followers].filter(Boolean),
           type: "STATUS_CHANGED",
           ticket: row,
           orgId,
@@ -362,23 +343,16 @@ ticketsRouter.post("/bulk-status", requireAuth, async (req, res) => {
 ticketsRouter.get("/:id", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
-  const full = await prisma.ticket.findUnique({
-    where: { id: ticket.id },
-    include: ticketInclude,
-  });
+  const full = await hydrateTicket(await db.tickets.mustById(ticket.id));
   const user = req.user!;
   const orgId = ticket.project.orgId;
   const internal = isInternal(user, orgId);
   const following = internal
-    ? Boolean(
-        await prisma.ticketFollower.findUnique({
-          where: { ticketId_userId: { ticketId: ticket.id, userId: user.id } },
-        }),
-      )
+    ? await db.followers.exists({ ticketId: ticket.id, userId: user.id })
     : false;
   res.json({
     ...serialize(full),
-    followerCount: internal ? await prisma.ticketFollower.count({ where: { ticketId: ticket.id } }) : undefined,
+    followerCount: internal ? await db.followers.count({ ticketId: ticket.id }) : undefined,
     following,
     can: ticketPermissions(user, orgId, ticket),
   });
@@ -392,7 +366,7 @@ const updateSchema = z.object({
   status: z.enum(["OPEN", "IN_PROGRESS", "DONE"]).optional(),
   dueDate: z.string().datetime().nullish(),
   estimate: z.number().positive().nullish(),
-  assigneeId: z.string().nullish(),
+  ...assigneeFields,
 });
 
 ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
@@ -439,40 +413,37 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
   }
 
 
-  let newAssignee: string | null | undefined;
-  if (body.assigneeId !== undefined) {
-    if (!admin) return res.status(403).json({ error: "Only admins can reassign" });
-    if (body.assigneeId && !(await isAssignableMember(body.assigneeId, orgId))) {
-      return res.status(400).json({ error: "Assignee must be an internal org member" });
-    }
-    newAssignee = body.assigneeId ?? null;
-    data.assigneeId = newAssignee;
+  const before = ticket.assigneeIds ?? [];
+  let after = before;
+  const requested = requestedAssignees(body);
+  if (requested !== undefined) {
+    if (!admin) return res.status(403).json({ error: "Only admins can assign or unassign" });
+    const check = await validateAssignees(requested, orgId, ticket.projectId, before);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    after = check.ids;
+    data.assigneeIds = after;
   }
-
-  const oldAssignee =
-    newAssignee !== undefined && ticket.assigneeId
-      ? await prisma.user.findUnique({ where: { id: ticket.assigneeId }, select: { name: true } })
-      : null;
+  const { added, removed } = diffAssignees(before, after);
+  const names = new Map(
+    (await db.users.find({ _id: { $in: [...added, ...removed] } })).map((u) => [u.id, u.name] as const),
+  );
   const dayOf = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
 
-  const updated = await prisma.$transaction(async (tx) => {
-    const row = await tx.ticket.update({
-      where: { id: ticket.id },
-      data,
-      include: ticketInclude,
-    });
+  const updated = await withTransaction(async (tx) => {
+    const row = await hydrateTicket(await db.tickets.mustUpdate({ _id: ticket.id }, data, { session: tx }), tx);
     const log = (a: Omit<Parameters<typeof logActivity>[1], "ticketId" | "actorId">) =>
       logActivity(tx, { ticketId: ticket.id, actorId: user.id, ...a });
 
     if (statusChanged) {
-      await tx.ticketStatusHistory.create({
-        data: {
+      await db.statusHistory.create(
+        {
           ticketId: ticket.id,
           fromStatus: ticket.status,
           toStatus: row.status,
           changedById: user.id,
         },
-      });
+        { session: tx },
+      );
       await log({ type: "STATUS_CHANGED", field: "status", from: ticket.status, to: row.status });
     }
     if (row.priority !== ticket.priority) {
@@ -490,14 +461,11 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
     if (dayOf(row.dueDate) !== dayOf(ticket.dueDate)) {
       await log({ type: "DUE_DATE_CHANGED", field: "dueDate", from: dayOf(ticket.dueDate), to: dayOf(row.dueDate) });
     }
-    if (newAssignee !== undefined && newAssignee !== ticket.assigneeId) {
-      await log({
-        type: "ASSIGNED",
-        field: "assignee",
-        from: oldAssignee?.name ?? null,
-        to: row.assignee?.name ?? null,
-        meta: { fromId: ticket.assigneeId, toId: newAssignee },
-      });
+    for (const id of added) {
+      await log({ type: "ASSIGNED", field: "assignee", from: null, to: names.get(id) ?? null, meta: { toId: id } });
+    }
+    for (const id of removed) {
+      await log({ type: "ASSIGNED", field: "assignee", from: names.get(id) ?? null, to: null, meta: { fromId: id, toId: null } });
     }
     return row;
   });
@@ -508,7 +476,7 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
 
   if (statusChanged) {
     await notify({
-      recipientIds: [ticket.reporterId, ticket.assigneeId ?? "", ...followers].filter(Boolean),
+      recipientIds: [ticket.reporterId, ...after, ...followers].filter(Boolean),
       type: "STATUS_CHANGED",
       ticket: updated,
       orgId,
@@ -517,14 +485,14 @@ ticketsRouter.patch("/:id", requireAuth, async (req, res) => {
       telegram: true,
     });
   }
-  if (newAssignee && newAssignee !== ticket.assigneeId) {
+  if (added.length) {
     await notify({
-      recipientIds: [newAssignee],
+      recipientIds: added,
       type: "ASSIGNED",
       ticket: updated,
       orgId,
       actorId: user.id,
-      message: `${user.name} assigned "${updated.title}" to ${updated.assignee?.name ?? "someone"}.`,
+      message: `${user.name} assigned "${updated.title}" to ${listNames(added.map((id) => names.get(id) ?? "someone"))}.`,
       telegram: true,
     });
   }
@@ -551,10 +519,10 @@ ticketsRouter.get("/:id/impact", requireAuth, async (req, res) => {
   const ticket = await loadDeletableTicket(req, res);
   if (!ticket) return;
   const [comments, attachments, activity, followers] = await Promise.all([
-    prisma.comment.count({ where: { ticketId: ticket.id } }),
-    prisma.attachment.count({ where: { ticketId: ticket.id } }),
-    prisma.ticketActivity.count({ where: { ticketId: ticket.id } }),
-    prisma.ticketFollower.count({ where: { ticketId: ticket.id } }),
+    db.comments.count({ ticketId: ticket.id }),
+    db.attachments.count({ ticketId: ticket.id }),
+    db.activity.count({ ticketId: ticket.id }),
+    db.followers.count({ ticketId: ticket.id }),
   ]);
   res.json({ comments, attachments, activity, followers });
 });
@@ -565,7 +533,7 @@ ticketsRouter.delete("/:id", requireAuth, async (req, res) => {
   if (!confirmed(req.body?.confirmTicketName, ticket.title)) {
     return res.status(400).json({ error: "Type the ticket's name to confirm deleting it." });
   }
-  await prisma.ticket.delete({ where: { id: ticket.id } });
+  await withTransaction((session) => deleteTicketsCascade([ticket.id], { session }));
   await deleteTicketFiles(ticket.id);
   res.json({ ok: true });
 });
@@ -575,31 +543,31 @@ ticketsRouter.post("/:id/self-assign", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
   const user = req.user!;
-  if (!isInternal(user, ticket.project.orgId)) {
-    return res.status(403).json({ error: "Only internal team members can self-assign" });
+  const orgId = ticket.project.orgId;
+  if (!isAdminOrAbove(user, orgId)) {
+    return res.status(403).json({ error: "Only admins can assign tickets" });
   }
   if (rejectIfArchived(ticket, res)) return;
-  if (ticket.assigneeId === user.id) {
-    const same = await prisma.ticket.findUnique({ where: { id: ticket.id }, include: ticketInclude });
+  const before = ticket.assigneeIds ?? [];
+  if (before.includes(user.id)) {
+    const same = await hydrateTicket(await db.tickets.mustById(ticket.id));
     return res.json(serialize(same));
   }
-  const previous = ticket.assigneeId
-    ? await prisma.user.findUnique({ where: { id: ticket.assigneeId }, select: { name: true } })
-    : null;
-  const updated = await prisma.$transaction(async (tx) => {
-    const row = await tx.ticket.update({
-      where: { id: ticket.id },
-      data: { assigneeId: user.id },
-      include: ticketInclude,
-    });
+  const check = await validateAssignees([...before, user.id], orgId, ticket.projectId, before);
+  if (!check.ok) return res.status(400).json({ error: check.error });
+  const updated = await withTransaction(async (tx) => {
+    const row = await hydrateTicket(
+      await db.tickets.mustUpdate({ _id: ticket.id }, { assigneeIds: check.ids }, { session: tx }),
+      tx,
+    );
     await logActivity(tx, {
       ticketId: ticket.id,
       actorId: user.id,
       type: "ASSIGNED",
       field: "assignee",
-      from: previous?.name ?? null,
+      from: null,
       to: user.name,
-      meta: { fromId: ticket.assigneeId, toId: user.id, self: true },
+      meta: { toId: user.id, self: true },
     });
     return row;
   });

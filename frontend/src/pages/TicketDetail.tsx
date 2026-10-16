@@ -12,6 +12,7 @@ import { Attachments } from "../components/Attachments";
 import { Comments } from "../components/Comments";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { TicketActions } from "../components/TicketActions";
+import { AssigneeList } from "../components/Assignees";
 import { IconArchive, IconCheckCircle } from "../components/Icons";
 
 export default function TicketDetail() {
@@ -23,7 +24,7 @@ export default function TicketDetail() {
   const [confirmingClose, setConfirmingClose] = useState(false);
   const [tab, setTab] = useState<"comments" | "activity">("comments");
 
-  // Moving between tickets (e.g. after Duplicate) starts on Comments again.
+
   useEffect(() => setTab("comments"), [id]);
 
   const { data: ticket, isLoading, isError, error } = useQuery({
@@ -32,8 +33,7 @@ export default function TicketDetail() {
     retry: (n, e: any) => e?.response?.status !== 404 && n < 2,
   });
 
-  // Cross-org notification clicks land here with a different active org —
-  // sync the switcher to the ticket's org.
+
   const ticketOrgId = ticket?.orgId ?? "";
   useEffect(() => {
     if (ticketOrgId && ticketOrgId !== activeOrgId) setActiveOrg(ticketOrgId);
@@ -44,7 +44,13 @@ export default function TicketDetail() {
     queryFn: () => api.projectMembers(ticketOrgId, ticket!.projectId),
     enabled: !!ticket && !!ticketOrgId,
   });
-  // Same key as <Comments/> — only used here for the tab's count.
+
+  const { data: assignableMembers } = useQuery({
+    queryKey: ["assignable", ticketOrgId, ticket?.projectId],
+    queryFn: () => api.assignableMembers(ticketOrgId, ticket!.projectId),
+    enabled: !!ticket && !!ticketOrgId && !!ticket.can?.assign,
+  });
+
   const { data: comments } = useQuery({
     queryKey: ["comments", id],
     queryFn: () => api.comments(id),
@@ -88,7 +94,7 @@ export default function TicketDetail() {
   const projectArchived = !!ticket.project?.archivedAt;
   const archived = !!ticket.archivedAt || projectArchived;
   const projectMembers = members ?? [];
-  const assignable = projectMembers.filter((m) => m.role !== "CLIENT");
+  const assignable = assignableMembers ?? [];
   const memberNames = projectMembers.map((m) => m.name);
   const can = ticket.can;
 
@@ -99,7 +105,7 @@ export default function TicketDetail() {
         {/* Breadcrumb */}
         {ticket.project && (
           <div className="mb-3 text-sm text-muted">
-            {/* keeps the "Back to <member>" state when going up to the project */}
+
             <Link to={`/projects/${ticket.projectId}`} state={location.state} className="link text-sm">
               {ticket.project.name}
             </Link>
@@ -196,15 +202,8 @@ export default function TicketDetail() {
             )}
           </Field>
 
-          <Field label="Assignee">
-            {ticket.assignee ? (
-              <span className="flex items-center gap-2" data-testid="detail-assignee">
-                <Avatar name={ticket.assignee.name} url={ticket.assignee.avatarUrl} size={22} />
-                {ticket.assignee.name}
-              </span>
-            ) : (
-              <span className="text-muted" data-testid="detail-assignee">Unassigned</span>
-            )}
+          <Field label={ticket.assignees?.length > 1 ? "Assignees" : "Assignee"}>
+            <AssigneeList assignees={ticket.assignees ?? []} />
           </Field>
 
           <Field label="Status">
@@ -280,7 +279,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-/** Highlight "@Name" tokens (known member names only) inside the description. */
+
 function renderWithMentions(body: string, memberNames: string[]) {
   if (memberNames.length === 0) return body;
   const escaped = [...memberNames]

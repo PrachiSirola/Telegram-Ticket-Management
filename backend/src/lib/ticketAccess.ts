@@ -1,10 +1,11 @@
 import type { Request, Response } from "express";
-import type { Project, Ticket } from "@prisma/client";
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
+import type { Project, Ticket } from "../db/types.js";
 import { canAccessOrg, isClient, membershipIn, orgRole, type AuthUser } from "./access.js";
 import { developerCanAccessProject } from "./projectAccess.js";
 
 export type TicketWithProject = Ticket & { project: Project };
+
 export async function userCanAccessTicket(
   user: AuthUser,
   ticket: TicketWithProject,
@@ -14,12 +15,7 @@ export async function userCanAccessTicket(
   if (isClient(user, orgId)) {
     if (ticket.archivedAt) return false;
     const membership = membershipIn(user, orgId)!;
-    const attached = await prisma.projectClient.findUnique({
-      where: {
-        projectId_membershipId: { projectId: ticket.projectId, membershipId: membership.id },
-      },
-    });
-    return Boolean(attached);
+    return db.projectClients.exists({ projectId: ticket.projectId, membershipId: membership.id });
   }
   if (orgRole(user, orgId) === "DEVELOPER") {
     const membership = membershipIn(user, orgId)!;
@@ -27,20 +23,26 @@ export async function userCanAccessTicket(
   }
   return true;
 }
+
+export async function loadTicketWithProject(id: string): Promise<TicketWithProject | null> {
+  const ticket = await db.tickets.byId(id);
+  if (!ticket) return null;
+  const project = await db.projects.byId(ticket.projectId);
+  return project ? { ...ticket, project } : null;
+}
+
 export async function loadTicketForUser(
   req: Request,
   res: Response,
 ): Promise<TicketWithProject | null> {
-  const ticket = await prisma.ticket.findUnique({
-    where: { id: req.params.id },
-    include: { project: true },
-  });
+  const ticket = await loadTicketWithProject(req.params.id);
   if (!ticket || !req.user || !(await userCanAccessTicket(req.user, ticket))) {
     res.status(404).json({ error: "Ticket not found" });
     return null;
   }
   return ticket;
 }
+
 export function rejectIfArchived(
   ticket: Ticket & { project?: { archivedAt: Date | null } | null },
   res: Response,

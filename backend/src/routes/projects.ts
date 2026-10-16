@@ -1,33 +1,25 @@
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../prisma.js";
+import { db, deleteProjectCascade, withTransaction } from "../db/index.js";
+import type { Project } from "../db/types.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireOrgRole, requireProjectAccess } from "../middleware/org.js";
-import { isClient, membershipIn, orgRole, type AuthUser } from "../lib/access.js";
+import { isInternal, orgRole, type AuthUser } from "../lib/access.js";
 import { confirmed } from "../lib/confirmName.js";
 import { deleteTicketFiles } from "../lib/storage.js";
-import { developerVisibleProjectsWhere } from "../lib/projectAccess.js";
-
+import { projectScopeFilter } from "../lib/projectAccess.js";
+import { projectMembers } from "../lib/attachmentAccess.js";
+import { assignablePool } from "../lib/assignees.js";
+import { and, contains, OPEN_STATUSES } from "../lib/mongoFilters.js";
 
 export const projectsRouter = Router({ mergeParams: true });
 
-const OPEN_STATUSES: Array<"OPEN" | "IN_PROGRESS"> = ["OPEN", "IN_PROGRESS"];
-
-const projectSelect = {
-  id: true,
-  name: true,
-  description: true,
-  createdAt: true,
-  archivedAt: true,
-  _count: { select: { tickets: { where: { status: { in: OPEN_STATUSES }, archivedAt: null } } } },
-};
-
-function serialize(p: any) {
+function serialize(p: Project, ticketCount = 0) {
   return {
     id: p.id,
     name: p.name,
     description: p.description,
-    ticketCount: p._count?.tickets ?? 0,
+    ticketCount,
     createdAt: p.createdAt,
     archivedAt: p.archivedAt ?? null,
   };
@@ -35,37 +27,37 @@ function serialize(p: any) {
 
 const MAX_PAGE_SIZE = 100;
 
-function statusWhere(status: string | undefined): Record<string, unknown> {
-  if (status === "new") {
-    return { tickets: { none: {} } };
-  }
-  if (status === "current") {
-
-    return { OR: [{ tickets: { none: {} } }, { tickets: { some: { status: { in: OPEN_STATUSES } } } }] };
-  }
-  if (status === "active") {
-    return { tickets: { some: { status: { in: OPEN_STATUSES } } } };
-  }
-  if (status === "closed") {
-    return {
-      AND: [
-        { tickets: { some: {} } },
-        { tickets: { none: { status: { in: OPEN_STATUSES } } } },
-      ],
-    };
-  }
-  return {};
+interface ProjectStats {
+  total: number; 
+  open: number; 
+  openLive: number; 
 }
 
+async function ticketStats(projectIds: string[]): Promise<Map<string, ProjectStats>> {
+  const out = new Map<string, ProjectStats>(projectIds.map((id) => [id, { total: 0, open: 0, openLive: 0 }]));
+  if (projectIds.length === 0) return out;
+  const isOpen = { $in: ["$status", [...OPEN_STATUSES]] };
+  const rows = await db.tickets.aggregate<{ _id: string } & ProjectStats>([
+    { $match: { projectId: { $in: projectIds } } },
+    {
+      $group: {
+        _id: "$projectId",
+        total: { $sum: 1 },
+        open: { $sum: { $cond: [isOpen, 1, 0] } },
+        openLive: { $sum: { $cond: [{ $and: [isOpen, { $lte: ["$archivedAt", null] }] }, 1, 0] } },
+      },
+    },
+  ]);
+  for (const r of rows) out.set(r._id, { total: r.total, open: r.open, openLive: r.openLive });
+  return out;
+}
 
-function scopedWhere(user: AuthUser, orgId: string) {
-  let scope: Record<string, unknown> = {};
-  if (isClient(user, orgId)) {
-    scope = { clients: { some: { membershipId: membershipIn(user, orgId)!.id } } };
-  } else if (orgRole(user, orgId) === "DEVELOPER") {
-    scope = developerVisibleProjectsWhere(user.id, membershipIn(user, orgId)!.id);
-  }
-  return { orgId, ...scope };
+function matchesStatus(status: string | undefined, st: ProjectStats): boolean {
+  if (status === "new") return st.total === 0;
+  if (status === "current") return st.total === 0 || st.open > 0;
+  if (status === "active") return st.open > 0;
+  if (status === "closed") return st.total > 0 && st.open === 0;
+  return true;
 }
 
 const canManageProjects = (user: AuthUser, orgId: string) => {
@@ -73,50 +65,39 @@ const canManageProjects = (user: AuthUser, orgId: string) => {
   return r === "SUPER_ADMIN" || r === "ADMIN";
 };
 
-
-function listWhere(user: AuthUser, orgId: string, status: string | undefined, q: string) {
-  const scope = scopedWhere(user, orgId);
-  const { orgId: _o, ...scopeRest } = scope as Record<string, unknown>;
-  const archivedPart =
-    status === "archived"
-      ? canManageProjects(user, orgId)
-        ? { archivedAt: { not: null } }
-        : { id: { in: [] as string[] } } // non-admins never see archived projects
-      : { archivedAt: null };
-  return {
-    orgId,
-    AND: [
-      scopeRest,
-      archivedPart,
-      ...(status === "archived" ? [] : [statusWhere(status)]),
-      ...(q
-        ? [
-            {
-              OR: [
-                { name: { contains: q, mode: "insensitive" as const } },
-                { description: { contains: q, mode: "insensitive" as const } },
-              ],
-            },
-          ]
-        : []),
-    ],
-  };
+async function listProjects(user: AuthUser, orgId: string, status: string | undefined, q: string) {
+  if (status === "archived" && !canManageProjects(user, orgId)) return []; // non-admins never see archived projects
+  const scope = await projectScopeFilter(user, orgId);
+  const rows = await db.projects.find(
+    and(
+      { orgId },
+      scope,
+      status === "archived" ? { archivedAt: { $ne: null } } : { archivedAt: null },
+      q ? { $or: [{ name: contains(q) }, { description: contains(q) }] } : undefined,
+    ),
+    { sort: { name: 1, _id: 1 }, ci: true },
+  );
+  const stats = await ticketStats(rows.map((p) => p.id));
+  return rows
+    .filter((p) => status === "archived" || matchesStatus(status, stats.get(p.id)!))
+    .map((p) => ({ project: p, ticketCount: stats.get(p.id)!.openLive }));
 }
-
 
 projectsRouter.get("/counts", requireAuth, requireOrgAccess, async (req, res) => {
   const orgId = req.params.orgId;
   const user = req.user!;
-  const count = (status: string | undefined) => prisma.project.count({ where: listWhere(user, orgId, status, "") });
-  const [all, current, active, closed, newCount, archived] = await Promise.all([
-    count(undefined),
-    count("current"),
-    count("active"),
-    count("closed"),
-    count("new"),
-    count("archived"),
-  ]);
-  res.json({ all, current, active, closed, new: newCount, archived });
+  const live = await listProjects(user, orgId, undefined, "");
+  const stats = await ticketStats(live.map((p) => p.project.id));
+  const tally = (status: string) => live.filter((p) => matchesStatus(status, stats.get(p.project.id)!)).length;
+  const archived = canManageProjects(user, orgId) ? (await listProjects(user, orgId, "archived", "")).length : 0;
+  res.json({
+    all: live.length,
+    current: tally("current"),
+    active: tally("active"),
+    closed: tally("closed"),
+    new: tally("new"),
+    archived,
+  });
 });
 
 projectsRouter.get("/", requireAuth, requireOrgAccess, async (req, res) => {
@@ -124,18 +105,12 @@ projectsRouter.get("/", requireAuth, requireOrgAccess, async (req, res) => {
   const user = req.user!;
 
   const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-
-  const where = listWhere(user, orgId, typeof req.query.status === "string" ? req.query.status : undefined, q);
+  const items = (
+    await listProjects(user, orgId, typeof req.query.status === "string" ? req.query.status : undefined, q)
+  ).map((r) => serialize(r.project, r.ticketCount));
 
   const pageRaw = req.query.page;
-  if (pageRaw === undefined) {
-    const projects = await prisma.project.findMany({
-      where,
-      select: projectSelect,
-      orderBy: { name: "asc" },
-    });
-    return res.json(projects.map(serialize));
-  }
+  if (pageRaw === undefined) return res.json(items);
 
   const page = Math.max(1, parseInt(String(pageRaw), 10) || 1);
   const pageSize = Math.min(
@@ -143,16 +118,18 @@ projectsRouter.get("/", requireAuth, requireOrgAccess, async (req, res) => {
     Math.max(1, parseInt(String(req.query.pageSize ?? "18"), 10) || 18),
   );
 
-  const all = await prisma.project.findMany({ where, select: projectSelect });
-  const ranked = all.map(serialize).sort(
+  const ranked = items.sort(
     (x, y) =>
       y.ticketCount - x.ticketCount ||
       x.name.localeCompare(y.name, undefined, { sensitivity: "base" }) ||
       x.id.localeCompare(y.id),
   );
-  const items = ranked.slice((page - 1) * pageSize, page * pageSize);
-  res.json({ items, total: ranked.length, page, pageSize });
+  res.json({ items: ranked.slice((page - 1) * pageSize, page * pageSize), total: ranked.length, page, pageSize });
 });
+
+async function openCount(projectId: string) {
+  return (await ticketStats([projectId])).get(projectId)!.openLive;
+}
 
 const upsertSchema = z.object({
   name: z.string().min(1).max(100),
@@ -167,15 +144,12 @@ projectsRouter.post(
   async (req, res) => {
     const parsed = upsertSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Project name is required." });
-    const project = await prisma.project.create({
-      data: {
-        orgId: req.params.orgId,
-        name: parsed.data.name.trim(),
-        description: parsed.data.description ?? "",
-      },
-      select: projectSelect,
+    const project = await db.projects.create({
+      orgId: req.params.orgId,
+      name: parsed.data.name.trim(),
+      description: parsed.data.description ?? "",
     });
-    res.status(201).json(serialize(project));
+    res.status(201).json(serialize(project, 0));
   },
 );
 
@@ -194,24 +168,20 @@ projectsRouter.patch(
     if (parsed.data.name !== undefined && !parsed.data.name.trim()) {
       return res.status(400).json({ error: "Project name is required." });
     }
-    const project = await prisma.project.update({
-      where: { id: req.project!.id },
-      data: {
+    const project = await db.projects.mustUpdate(
+      { _id: req.project!.id },
+      {
         ...(parsed.data.name !== undefined ? { name: parsed.data.name.trim() } : {}),
         ...(parsed.data.description !== undefined ? { description: parsed.data.description } : {}),
       },
-      select: projectSelect,
-    });
-    res.json(serialize(project));
+    );
+    res.json(serialize(project, await openCount(project.id)));
   },
 );
 
 projectsRouter.get("/:projectId", requireAuth, requireOrgAccess, requireProjectAccess, async (req, res) => {
-  const project = await prisma.project.findUniqueOrThrow({
-    where: { id: req.project!.id },
-    select: projectSelect,
-  });
-  res.json(serialize(project));
+  const project = await db.projects.mustById(req.project!.id);
+  res.json(serialize(project, await openCount(project.id)));
 });
 
 const bulkProjectsSchema = z.object({
@@ -227,7 +197,7 @@ projectsRouter.post("/bulk", requireAuth, requireOrgAccess, requireOrgRole("SUPE
   const { orgId } = req.params;
   const actorId = req.user!.id;
 
-  const found = await prisma.project.findMany({ where: { id: { in: ids }, orgId }, select: { id: true, name: true, archivedAt: true } });
+  const found = await db.projects.find({ _id: { $in: ids }, orgId });
   const byId = new Map(found.map((p) => [p.id, p]));
 
   const updated: { id: string; name: string; tickets?: number }[] = [];
@@ -244,35 +214,37 @@ projectsRouter.post("/bulk", requireAuth, requireOrgAccess, requireOrgRole("SUPE
     try {
       if (action === "archive") {
         if (project.archivedAt) { skipped.push({ id, name: project.name, reason: "Already archived" }); continue; }
-        await prisma.project.update({ where: { id }, data: { archivedAt: new Date() } });
+        await db.projects.mustUpdate({ _id: id }, { archivedAt: new Date() });
         updated.push({ id, name: project.name });
       } else if (action === "restore") {
         if (!project.archivedAt) { skipped.push({ id, name: project.name, reason: "Not archived" }); continue; }
-        await prisma.project.update({ where: { id }, data: { archivedAt: null } });
+        await db.projects.mustUpdate({ _id: id }, { archivedAt: null });
         updated.push({ id, name: project.name });
       } else {
         if (project.archivedAt) { failed.push({ id, name: project.name, reason: "It's archived — restore it first" }); continue; }
-        const open = await prisma.ticket.findMany({
-          where: { projectId: id, archivedAt: null, status: { in: OPEN_STATUSES } },
-          select: { id: true, status: true },
-        });
+        const open = await db.tickets.find(
+          { projectId: id, archivedAt: null, status: { $in: [...OPEN_STATUSES] } },
+          { select: ["id", "status"] },
+        );
         if (open.length === 0) { skipped.push({ id, name: project.name, reason: "No open tickets" }); continue; }
-        await prisma.$transaction(async (tx) => {
-       
-          const now = await tx.ticket.findMany({
-            where: { id: { in: open.map((t) => t.id) }, status: { in: OPEN_STATUSES } },
-            select: { id: true, status: true },
-          });
-          await tx.ticket.updateMany({ where: { id: { in: now.map((t) => t.id) } }, data: { status: "DONE" } });
-          await tx.ticketStatusHistory.createMany({
-            data: now.map((t) => ({ ticketId: t.id, fromStatus: t.status, toStatus: "DONE" as const, changedById: actorId })),
-          });
-          await tx.ticketActivity.createMany({
-            data: now.map((t) => ({
-              ticketId: t.id, actorId, type: "STATUS_CHANGED" as const, field: "status", fromValue: t.status, toValue: "DONE",
+        await withTransaction(async (session) => {
+          // Re-read inside the transaction so a ticket that changed meanwhile isn't counted twice.
+          const now = await db.tickets.find(
+            { _id: { $in: open.map((t) => t.id) }, status: { $in: [...OPEN_STATUSES] } },
+            { select: ["id", "status"], session },
+          );
+          await db.tickets.updateMany({ _id: { $in: now.map((t) => t.id) } }, { status: "DONE" }, { session });
+          await db.statusHistory.createMany(
+            now.map((t) => ({ ticketId: t.id, fromStatus: t.status, toStatus: "DONE", changedById: actorId })),
+            { session },
+          );
+          await db.activity.createMany(
+            now.map((t) => ({
+              ticketId: t.id, actorId, type: "STATUS_CHANGED", field: "status", fromValue: t.status, toValue: "DONE",
               meta: { viaProjectClose: true },
             })),
-          });
+            { session },
+          );
           open.length = now.length;
         });
         updated.push({ id, name: project.name, tickets: open.length });
@@ -297,12 +269,11 @@ projectsRouter.post(
     if (!confirmed(req.body?.confirmName, req.project!.name)) {
       return res.status(400).json({ error: "Type the project's name to confirm archiving it." });
     }
-    const project = await prisma.project.update({
-      where: { id: req.project!.id },
-      data: { archivedAt: req.project!.archivedAt ?? new Date() },
-      select: projectSelect,
-    });
-    res.json(serialize(project));
+    const project = await db.projects.mustUpdate(
+      { _id: req.project!.id },
+      { archivedAt: req.project!.archivedAt ?? new Date() },
+    );
+    res.json(serialize(project, await openCount(project.id)));
   },
 );
 projectsRouter.post(
@@ -312,12 +283,8 @@ projectsRouter.post(
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
   requireProjectAccess,
   async (req, res) => {
-    const project = await prisma.project.update({
-      where: { id: req.project!.id },
-      data: { archivedAt: null },
-      select: projectSelect,
-    });
-    res.json(serialize(project));
+    const project = await db.projects.mustUpdate({ _id: req.project!.id }, { archivedAt: null });
+    res.json(serialize(project, await openCount(project.id)));
   },
 );
 
@@ -330,10 +297,11 @@ projectsRouter.get(
   requireProjectAccess,
   async (req, res) => {
     const projectId = req.project!.id;
+    const ticketIds = await db.tickets.distinct("_id", { projectId });
     const [tickets, comments, attachments] = await Promise.all([
-      prisma.ticket.count({ where: { projectId } }),
-      prisma.comment.count({ where: { ticket: { projectId } } }),
-      prisma.attachment.count({ where: { ticket: { projectId } } }),
+      Promise.resolve(ticketIds.length),
+      db.comments.count({ ticketId: { $in: ticketIds } }),
+      db.attachments.count({ ticketId: { $in: ticketIds } }),
     ]);
     res.json({ tickets, comments, attachments });
   },
@@ -351,12 +319,9 @@ projectsRouter.delete(
     if (confirmName !== req.project!.name.trim()) {
       return res.status(400).json({ error: "Type the project's name to confirm deleting it." });
     }
-    const tickets = await prisma.ticket.findMany({
-      where: { projectId: req.project!.id },
-      select: { id: true },
-    });
-    await prisma.project.delete({ where: { id: req.project!.id } });
-    for (const t of tickets) await deleteTicketFiles(t.id);
+    const ticketIds = await db.tickets.distinct("_id", { projectId: req.project!.id });
+    await withTransaction((session) => deleteProjectCascade(req.project!.id, { session }));
+    for (const id of ticketIds) await deleteTicketFiles(id);
     res.json({ ok: true });
   },
 );
@@ -368,31 +333,19 @@ projectsRouter.get(
   requireOrgAccess,
   requireProjectAccess,
   async (req, res) => {
-    const projectId = req.project!.id;
-    const memberships = await prisma.orgMembership.findMany({
-      where: {
-        orgId: req.params.orgId,
-        disabled: false,
-        OR: [
-          { role: { in: ["SUPER_ADMIN", "ADMIN"] } },
-          { role: "DEVELOPER", projectDevAccess: { some: { projectId } } },
-          { role: "DEVELOPER", user: { assignedTickets: { some: { projectId } } } },
-          { role: "CLIENT", projectAccess: { some: { projectId } } },
-        ],
-      },
-      include: { user: { select: { id: true, name: true, email: true, avatarUrl: true } } },
-      orderBy: { createdAt: "asc" },
-    });
-    res.json(
-      memberships.map((m) => ({
-        membershipId: m.id,
-        userId: m.user.id,
-        name: m.user.name,
-        email: m.user.email,
-        avatarUrl: m.user.avatarUrl,
-        role: m.role,
-      })),
-    );
+    res.json(await projectMembers(req.params.orgId, req.project!.id));
+  },
+);
+
+/** Who can be assigned to this project's tickets (Super Admins/Admins + developers attached to the project). */
+projectsRouter.get(
+  "/:projectId/assignable",
+  requireAuth,
+  requireOrgAccess,
+  requireProjectAccess,
+  async (req, res) => {
+    if (!isInternal(req.user!, req.params.orgId)) return res.status(403).json({ error: "Not allowed" });
+    res.json(await assignablePool(req.params.orgId, req.project!.id));
   },
 );
 
@@ -410,26 +363,21 @@ projectsRouter.put(
     const desired = [...new Set(parsed.data.membershipIds)];
 
   
-    const valid = await prisma.orgMembership.findMany({
-      where: { id: { in: desired }, orgId: req.params.orgId, role: "CLIENT" },
-      select: { id: true },
-    });
+    const valid = await db.memberships.find({ _id: { $in: desired }, orgId: req.params.orgId, role: "CLIENT" }, { select: ["id"] });
     if (valid.length !== desired.length) {
       return res.status(400).json({ error: "One or more ids are not client members of this org" });
     }
 
     const projectId = req.project!.id;
-    const current = await prisma.projectClient.findMany({ where: { projectId } });
+    const current = await db.projectClients.find({ projectId });
     const currentIds = new Set(current.map((c) => c.membershipId));
-    const desiredIds = new Set(desired);
-    await prisma.$transaction([
-      ...desired
-        .filter((id) => !currentIds.has(id))
-        .map((membershipId) => prisma.projectClient.create({ data: { projectId, membershipId } })),
-      prisma.projectClient.deleteMany({
-        where: { projectId, membershipId: { notIn: [...desiredIds] } },
-      }),
-    ]);
+    await withTransaction(async (session) => {
+      await db.projectClients.createMany(
+        desired.filter((id) => !currentIds.has(id)).map((membershipId) => ({ projectId, membershipId })),
+        { session },
+      );
+      await db.projectClients.deleteMany({ projectId, membershipId: { $nin: desired } }, { session });
+    });
     res.json({ ok: true });
   },
 );
@@ -447,10 +395,7 @@ projectsRouter.put(
     const desired = [...new Set(parsed.data.membershipIds)];
 
 
-    const valid = await prisma.orgMembership.findMany({
-      where: { id: { in: desired }, orgId: req.params.orgId, role: "DEVELOPER" },
-      select: { id: true },
-    });
+    const valid = await db.memberships.find({ _id: { $in: desired }, orgId: req.params.orgId, role: "DEVELOPER" }, { select: ["id"] });
     if (valid.length !== desired.length) {
       return res
         .status(400)
@@ -458,19 +403,15 @@ projectsRouter.put(
     }
 
     const projectId = req.project!.id;
-    const current = await prisma.projectDeveloper.findMany({ where: { projectId } });
+    const current = await db.projectDevelopers.find({ projectId });
     const currentIds = new Set(current.map((c) => c.membershipId));
-    const desiredIds = new Set(desired);
-    await prisma.$transaction([
-      ...desired
-        .filter((id) => !currentIds.has(id))
-        .map((membershipId) =>
-          prisma.projectDeveloper.create({ data: { projectId, membershipId } }),
-        ),
-      prisma.projectDeveloper.deleteMany({
-        where: { projectId, membershipId: { notIn: [...desiredIds] } },
-      }),
-    ]);
+    await withTransaction(async (session) => {
+      await db.projectDevelopers.createMany(
+        desired.filter((id) => !currentIds.has(id)).map((membershipId) => ({ projectId, membershipId })),
+        { session },
+      );
+      await db.projectDevelopers.deleteMany({ projectId, membershipId: { $nin: desired } }, { session });
+    });
     res.json({ ok: true });
   },
 );

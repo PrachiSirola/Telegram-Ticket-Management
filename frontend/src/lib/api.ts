@@ -55,7 +55,6 @@ export const api = {
     http.post("/auth/login", data).then((r) => r.data),
   logout: () => http.post("/auth/logout").then((r) => r.data),
 
-  // Organisation signup (open, OTP-verified)
   signup: (data: { orgName: string; name: string; email: string; password: string }) =>
     http.post("/auth/signup", data).then((r) => r.data),
   verifySignup: (data: { email: string; code: string }) =>
@@ -111,10 +110,8 @@ export const api = {
   updateMember: (
     orgId: string,
     userId: string,
-    // Disabling a member needs their exact name (checked server-side too).
     data: { role?: "ADMIN" | "DEVELOPER" | "CLIENT"; disabled?: boolean; confirmName?: string },
   ) => http.patch(`/orgs/${orgId}/members/${userId}`, data).then((r) => r.data),
-  // The server requires the member's exact name as confirmation.
   removeMember: (orgId: string, userId: string, confirmName: string) =>
     http.delete(`/orgs/${orgId}/members/${userId}`, { data: { confirmName } }).then((r) => r.data),
   memberImpact: (orgId: string, userId: string) =>
@@ -147,7 +144,6 @@ export const api = {
   resendInvite: (orgId: string, inviteId: string) =>
     http.post(`/orgs/${orgId}/invites/${inviteId}/resend`).then((r) => r.data),
 
-  // --- Projects ---
   projects: (orgId: string) =>
     http.get<Project[]>(`/orgs/${orgId}/projects`).then((r) => r.data),
 
@@ -183,6 +179,9 @@ export const api = {
     http.delete(`/orgs/${orgId}/projects/${projectId}`, { data: { confirmName } }).then((r) => r.data),
   projectMembers: (orgId: string, projectId: string) =>
     http.get<Member[]>(`/orgs/${orgId}/projects/${projectId}/members`).then((r) => r.data),
+  /** Members of the project who can be assigned to its tickets (admins + attached developers). */
+  assignableMembers: (orgId: string, projectId: string) =>
+    http.get<TeamMember[]>(`/orgs/${orgId}/projects/${projectId}/assignable`).then((r) => r.data),
   setProjectClients: (orgId: string, projectId: string, membershipIds: string[]) =>
     http.put(`/orgs/${orgId}/projects/${projectId}/clients`, { membershipIds }).then((r) => r.data),
   setProjectDevelopers: (orgId: string, projectId: string, membershipIds: string[]) =>
@@ -247,7 +246,7 @@ export const api = {
       priority?: TicketPriority;
       type?: TicketType;
       dueDate?: string | null;
-      assigneeId?: string | null;
+      assigneeIds?: string[];
       mentions?: string[];
     },
   ) =>
@@ -263,7 +262,7 @@ export const api = {
       priority: TicketPriority;
       type: TicketType;
       dueDate: string | null;
-      assigneeId: string | null;
+      assigneeIds: string[];
     }>,
   ) => http.patch<Ticket>(`/tickets/${id}`, data).then((r) => r.data),
   bulkUpdateStatus: (ids: string[], status: TicketStatus) =>
@@ -351,7 +350,7 @@ export const api = {
   restoreTicket: (ticketId: string) =>
     http.post(`/tickets/${ticketId}/restore`).then((r) => r.data),
 
-  // --- Me / notifications ---
+
   myTickets: (orgId: string, filter: "assigned" | "reported" = "assigned") =>
     http.get<Ticket[]>("/me/tickets", { params: { orgId, filter } }).then((r) => r.data),
   myTicketsPaged: (

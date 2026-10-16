@@ -1,20 +1,18 @@
-import type { Prisma } from "@prisma/client";
-import { prisma } from "../prisma.js";
+import { db, type Filter } from "../db/index.js";
 import { isAdminOrAbove, isClient, orgRole, type AuthUser } from "./access.js";
 
 export type AttVisibility = "INTERNAL" | "CLIENT_VISIBLE" | "SELECTED";
 export const ATTACHMENT_VISIBILITIES: AttVisibility[] = ["INTERNAL", "CLIENT_VISIBLE", "SELECTED"];
-export function attachmentVisibleWhere(user: AuthUser, orgId: string): Prisma.AttachmentWhereInput {
+
+
+export async function attachmentVisibleFilter(user: AuthUser, orgId: string): Promise<Filter> {
   if (isAdminOrAbove(user, orgId)) return {};
-  const sharedWithMe: Prisma.AttachmentWhereInput = {
-    visibility: "SELECTED",
-    OR: [{ uploaderId: user.id }, { access: { some: { userId: user.id } } }],
-  };
-  if (isClient(user, orgId)) {
-    return { OR: [{ visibility: "CLIENT_VISIBLE" }, sharedWithMe] };
-  }
-  return { OR: [{ visibility: { in: ["INTERNAL", "CLIENT_VISIBLE"] } }, sharedWithMe] };
+  const sharedIds = await db.attachmentAccess.distinct("attachmentId", { userId: user.id });
+  const sharedWithMe = { visibility: "SELECTED", $or: [{ uploaderId: user.id }, { _id: { $in: sharedIds } }] };
+  if (isClient(user, orgId)) return { $or: [{ visibility: "CLIENT_VISIBLE" }, sharedWithMe] };
+  return { $or: [{ visibility: { $in: ["INTERNAL", "CLIENT_VISIBLE"] } }, sharedWithMe] };
 }
+
 export function canSeeAttachment(
   user: AuthUser,
   orgId: string,
@@ -26,29 +24,38 @@ export function canSeeAttachment(
   return att.uploaderId === user.id || (att.access ?? []).some((a) => a.userId === user.id);
 }
 
-export async function projectMemberPool(orgId: string, projectId: string) {
-  const memberships = await prisma.orgMembership.findMany({
-    where: {
+export async function projectMembers(orgId: string, projectId: string) {
+  const [devAttached, clientAttached, assigned] = await Promise.all([
+    db.projectDevelopers.distinct("membershipId", { projectId }),
+    db.projectClients.distinct("membershipId", { projectId }),
+    db.tickets.distinct("assigneeIds", { projectId }),
+  ]);
+  const memberships = await db.memberships.find(
+    {
       orgId,
       disabled: false,
-      OR: [
-        { role: { in: ["SUPER_ADMIN", "ADMIN"] } },
-        { role: "DEVELOPER", projectDevAccess: { some: { projectId } } },
-        { role: "DEVELOPER", user: { assignedTickets: { some: { projectId } } } },
-        { role: "CLIENT", projectAccess: { some: { projectId } } },
+      $or: [
+        { role: { $in: ["SUPER_ADMIN", "ADMIN"] } },
+        { role: "DEVELOPER", _id: { $in: devAttached } },
+        { role: "DEVELOPER", userId: { $in: assigned } },
+        { role: "CLIENT", _id: { $in: clientAttached } },
       ],
     },
-    include: { user: { select: { id: true, name: true, email: true, avatarUrl: true } } },
-    orderBy: { createdAt: "asc" },
+    { sort: { createdAt: 1, _id: 1 } },
+  );
+  const users = new Map((await db.users.find({ _id: { $in: memberships.map((m) => m.userId) } })).map((u) => [u.id, u]));
+  return memberships.flatMap((m) => {
+    const u = users.get(m.userId);
+    return u
+      ? [{ membershipId: m.id, userId: u.id, name: u.name, email: u.email, avatarUrl: u.avatarUrl, role: m.role }]
+      : [];
   });
-  return memberships.map((m) => ({
-    userId: m.user.id,
-    name: m.user.name,
-    email: m.user.email,
-    avatarUrl: m.user.avatarUrl,
-    role: m.role,
-  }));
 }
+
+export async function projectMemberPool(orgId: string, projectId: string) {
+  return (await projectMembers(orgId, projectId)).map(({ membershipId: _m, ...rest }) => rest);
+}
+
 export function parseIdList(raw: unknown): string[] {
   let list: unknown[] = [];
   if (Array.isArray(raw)) list = raw;

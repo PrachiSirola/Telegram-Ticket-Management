@@ -1,8 +1,8 @@
 import bcrypt from "bcryptjs";
 import { createHash, randomBytes } from "node:crypto";
-import type { User } from "@prisma/client";
-import { prisma } from "../prisma.js";
-import { HISTORY_ROWS_KEPT, HISTORY_TX_OPTIONS, PIN_REUSE_MESSAGE, lockUserRow, type Tx } from "./credentialHistory.js";
+import { db, withTransaction } from "../db/index.js";
+import type { User } from "../db/types.js";
+import { HISTORY_ROWS_KEPT, PIN_REUSE_MESSAGE, lockUserRow, withUserLock, type Tx } from "./credentialHistory.js";
 import { isPasswordRecentlyUsed } from "./password.js";
 
 const SALT_ROUNDS = 12;
@@ -44,37 +44,37 @@ export interface PinChangeHooks {
 }
 export async function changePinWithHistory(userId: string, pin: string, hooks: PinChangeHooks = {}): Promise<void> {
   const newHash = await hashPin(pin); 
-  await prisma.$transaction(async (tx) => {
+  await withUserLock(userId, () => withTransaction(async (tx) => {
     await lockUserRow(tx, userId);
-    const user = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+    const user = await db.users.mustById(userId, { session: tx });
     await hooks.verify?.(tx, user);
 
-    const history = await tx.pinHistory.findMany({
-      where: { userId },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: HISTORY_ROWS_KEPT,
-      select: { pinHash: true },
-    });
+    const history = await db.pinHistory.find(
+      { userId },
+      { sort: { createdAt: -1, _id: -1 }, limit: HISTORY_ROWS_KEPT, session: tx },
+    );
     const recent = [...(user.pinHash ? [user.pinHash] : []), ...history.map((h) => h.pinHash)];
     if (await isPasswordRecentlyUsed(pin, recent)) throw new PinReuseError();
 
-    await tx.user.update({ where: { id: userId }, data: { pinHash: newHash, pinAttempts: 0, pinLockedUntil: null } });
-    if (user.pinHash) await tx.pinHistory.create({ data: { userId, pinHash: user.pinHash } });
-    const stale = await tx.pinHistory.findMany({
-      where: { userId },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      skip: HISTORY_ROWS_KEPT,
-      select: { id: true },
-    });
-    if (stale.length) await tx.pinHistory.deleteMany({ where: { id: { in: stale.map((x) => x.id) } } });
+    await db.users.mustUpdate(
+      { _id: userId },
+      { pinHash: newHash, pinAttempts: 0, pinLockedUntil: null },
+      { session: tx },
+    );
+    if (user.pinHash) await db.pinHistory.create({ userId, pinHash: user.pinHash }, { session: tx });
+    const stale = await db.pinHistory.find(
+      { userId },
+      { sort: { createdAt: -1, _id: -1 }, skip: HISTORY_ROWS_KEPT, select: ["id"], session: tx },
+    );
+    if (stale.length) await db.pinHistory.deleteMany({ _id: { $in: stale.map((x) => x.id) } }, { session: tx });
 
     await hooks.after?.(tx);
-  }, HISTORY_TX_OPTIONS);
+  }));
 }
 
 export const setPin = (userId: string, pin: string) => changePinWithHistory(userId, pin);
 export async function verifyPin(userId: string, candidate: string): Promise<void> {
-  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const user = await db.users.mustById(userId);
 
   if (user.pinLockedUntil && user.pinLockedUntil > new Date()) {
     throw new PinLockedError();
@@ -85,18 +85,18 @@ export async function verifyPin(userId: string, candidate: string): Promise<void
   if (!ok) {
     const attempts = user.pinAttempts + 1;
     const locked = attempts >= MAX_ATTEMPTS;
-    await prisma.user.update({
-      where: { id: userId },
-      data: {
+    await db.users.mustUpdate(
+      { _id: userId },
+      {
         pinAttempts: locked ? 0 : attempts,
         pinLockedUntil: locked ? new Date(Date.now() + LOCKOUT_MS) : null,
       },
-    });
+    );
     throw locked ? new PinLockedError() : new InvalidPinError();
   }
 
   if (user.pinAttempts !== 0) {
-    await prisma.user.update({ where: { id: userId }, data: { pinAttempts: 0, pinLockedUntil: null } });
+    await db.users.mustUpdate({ _id: userId }, { pinAttempts: 0, pinLockedUntil: null });
   }
 }
 
@@ -105,18 +105,16 @@ function hashToken(token: string) {
 }
 export async function createPinResetToken(userId: string): Promise<string> {
   const token = randomBytes(32).toString("hex");
-  await prisma.pinResetToken.create({
-    data: {
-      userId,
-      tokenHash: hashToken(token),
-      expiresAt: new Date(Date.now() + PIN_RESET_TTL_MS),
-    },
+  await db.pinResets.create({
+    userId,
+    tokenHash: hashToken(token),
+    expiresAt: new Date(Date.now() + PIN_RESET_TTL_MS),
   });
   return token;
 }
 
 export async function resetPinWithToken(token: string, newPin: string): Promise<void> {
-  const record = await prisma.pinResetToken.findUnique({ where: { tokenHash: hashToken(token) } });
+  const record = await db.pinResets.findOne({ tokenHash: hashToken(token) });
   if (!record || record.usedAt || record.expiresAt < new Date()) {
     throw new Error("This reset link is invalid or has expired.");
   }
@@ -126,17 +124,18 @@ export async function resetPinWithToken(token: string, newPin: string): Promise<
 
   await changePinWithHistory(record.userId, newPin, {
     verify: async (tx) => {
-      const fresh = await tx.pinResetToken.findUnique({ where: { id: record.id } });
+      const fresh = await db.pinResets.byId(record.id, { session: tx });
       if (!fresh || fresh.usedAt || fresh.expiresAt < new Date()) {
         throw new Error("This reset link is invalid or has expired.");
       }
     },
     after: async (tx) => {
-      await tx.pinResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } });
-      await tx.pinResetToken.updateMany({
-        where: { userId: record.userId, usedAt: null, id: { not: record.id } },
-        data: { usedAt: new Date() },
-      });
+      await db.pinResets.mustUpdate({ _id: record.id }, { usedAt: new Date() }, { session: tx });
+      await db.pinResets.updateMany(
+        { userId: record.userId, usedAt: null, _id: { $ne: record.id } },
+        { usedAt: new Date() },
+        { session: tx },
+      );
     },
   });
 }

@@ -1,26 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
+import type { Invite } from "../db/types.js";
 import { env } from "../env.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireOrgAccess, requireOrgRole } from "../middleware/org.js";
 import { isOrgSA } from "../lib/access.js";
 import { isAllowedEmailDomain } from "../lib/password.js";
 import { inviteEmail, sendEmail, type SendResult } from "../lib/email.js";
-import type { Invite } from "@prisma/client";
 
 async function sendInviteEmail(invite: Invite, inviterName: string): Promise<SendResult> {
   const [org, projects] = await Promise.all([
-    prisma.organization.findUniqueOrThrow({
-      where: { id: invite.orgId },
-      select: { name: true },
-    }),
+    db.orgs.mustById(invite.orgId),
     invite.projectIds.length
-      ? prisma.project.findMany({
-          where: { id: { in: invite.projectIds }, orgId: invite.orgId },
-          select: { name: true },
-        })
+      ? db.projects.find({ _id: { $in: invite.projectIds }, orgId: invite.orgId })
       : Promise.resolve([]),
   ]);
   const mail = inviteEmail({
@@ -61,11 +55,9 @@ invitesRouter.post(
       return res.status(403).json({ error: "Only the Super Admin can invite Admins" });
     }
 
-    const existingUser = await prisma.user.findUnique({ where: { email } });
+    const existingUser = await db.users.findOne({ email });
     if (existingUser) {
-      const member = await prisma.orgMembership.findUnique({
-        where: { userId_orgId: { userId: existingUser.id, orgId } },
-      });
+      const member = await db.memberships.findOne({ userId: existingUser.id, orgId });
       if (member) return res.status(409).json({ error: "This email is already a member" });
     }
     let projectIds: string[] = [];
@@ -74,36 +66,28 @@ invitesRouter.post(
       if (projectIds.length === 0) {
         return res.status(400).json({ error: "Client invites need at least one project" });
       }
-      const found = await prisma.project.findMany({
-        where: { id: { in: projectIds }, orgId },
-        select: { id: true },
-      });
+      const found = await db.projects.find({ _id: { $in: projectIds }, orgId }, { select: ["id"] });
       if (found.length !== projectIds.length) {
         return res.status(400).json({ error: "One or more projects don't exist in this org" });
       }
     } else if (role === "DEVELOPER") {
       projectIds = [...new Set(parsed.data.projectIds ?? [])];
       if (projectIds.length > 0) {
-        const found = await prisma.project.findMany({
-          where: { id: { in: projectIds }, orgId },
-          select: { id: true },
-        });
+        const found = await db.projects.find({ _id: { $in: projectIds }, orgId }, { select: ["id"] });
         if (found.length !== projectIds.length) {
           return res.status(400).json({ error: "One or more projects don't exist in this org" });
         }
       }
     }
 
-    const invite = await prisma.invite.create({
-      data: {
-        email,
-        role,
-        projectIds,
-        orgId,
-        token: randomUUID(),
-        invitedById: req.user!.id,
-        expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days
-      },
+    const invite = await db.invites.create({
+      email,
+      role,
+      projectIds,
+      orgId,
+      token: randomUUID(),
+      invitedById: req.user!.id,
+      expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
     });
 
     await sendInviteEmail(invite, req.user!.name);
@@ -171,24 +155,19 @@ invitesRouter.post(
 
     const emails = candidates.map((c) => c.email);
     const [users, pendingInvites] = await Promise.all([
-      prisma.user.findMany({
-        where: { email: { in: emails } },
-        select: { id: true, email: true, memberships: { where: { orgId }, select: { id: true } } },
-      }),
-      prisma.invite.findMany({
-        where: { orgId, email: { in: emails }, status: "PENDING", expiresAt: { gt: new Date() } },
-        select: { email: true },
-      }),
+      db.users.find({ email: { $in: emails } }),
+      db.invites.find({ orgId, email: { $in: emails }, status: "PENDING", expiresAt: { $gt: new Date() } }),
     ]);
-    const memberEmails = new Set(users.filter((u) => u.memberships.length > 0).map((u) => u.email.toLowerCase()));
+    const memberUserIds = new Set(
+      users.length ? await db.memberships.distinct("userId", { orgId, userId: { $in: users.map((u) => u.id) } }) : [],
+    );
+    const memberEmails = new Set(users.filter((u) => memberUserIds.has(u.id)).map((u) => u.email.toLowerCase()));
     const pendingEmails = new Set(pendingInvites.map((i) => i.email.toLowerCase()));
 
     const wantedProjects = [...new Set(candidates.flatMap((c) => (role === "ADMIN" ? [] : c.projectIds)))];
     const validProjects = new Set(
       wantedProjects.length
-        ? (await prisma.project.findMany({ where: { id: { in: wantedProjects }, orgId }, select: { id: true } })).map(
-            (p) => p.id,
-          )
+        ? (await db.projects.find({ _id: { $in: wantedProjects }, orgId }, { select: ["id"] })).map((p) => p.id)
         : [],
     );
 
@@ -213,16 +192,14 @@ invitesRouter.post(
       }
 
       try {
-        const invite = await prisma.invite.create({
-          data: {
-            email: c.email,
-            role,
-            projectIds,
-            orgId,
-            token: randomUUID(),
-            invitedById: req.user!.id,
-            expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days, same as single invite
-          },
+        const invite = await db.invites.create({
+          email: c.email,
+          role,
+          projectIds,
+          orgId,
+          token: randomUUID(),
+          invitedById: req.user!.id,
+          expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days, same as single invite
         });
         const sent = await sendInviteEmail(invite, inviterName);
         results.set(c.idx, {
@@ -257,10 +234,7 @@ invitesRouter.get(
   requireOrgAccess,
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
   async (req, res) => {
-    const invites = await prisma.invite.findMany({
-      where: { orgId: req.params.orgId },
-      orderBy: { createdAt: "desc" },
-    });
+    const invites = await db.invites.find({ orgId: req.params.orgId }, { sort: { createdAt: -1, _id: -1 } });
     res.json(
       invites.map((i) => ({
         id: i.id,
@@ -280,7 +254,7 @@ invitesRouter.post(
   requireOrgAccess,
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
   async (req, res) => {
-    const invite = await prisma.invite.findUnique({ where: { id: req.params.inviteId } });
+    const invite = await db.invites.byId(req.params.inviteId);
     if (!invite || invite.orgId !== req.params.orgId || invite.status !== "PENDING") {
       return res.status(404).json({ error: "Invite not found" });
     }
@@ -292,18 +266,17 @@ invitesRouter.post(
   },
 );
 
-// Revoke a pending invite.
 invitesRouter.delete(
   "/:inviteId",
   requireAuth,
   requireOrgAccess,
   requireOrgRole("SUPER_ADMIN", "ADMIN"),
   async (req, res) => {
-    const invite = await prisma.invite.findUnique({ where: { id: req.params.inviteId } });
+    const invite = await db.invites.byId(req.params.inviteId);
     if (!invite || invite.orgId !== req.params.orgId) {
       return res.status(404).json({ error: "Invite not found" });
     }
-    await prisma.invite.delete({ where: { id: invite.id } });
+    await db.invites.deleteOne({ _id: invite.id });
     res.json({ ok: true });
   },
 );

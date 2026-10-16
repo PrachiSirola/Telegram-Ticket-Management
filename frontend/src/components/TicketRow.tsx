@@ -1,12 +1,12 @@
 import { Link } from "react-router-dom";
 import type { Ticket } from "../types";
 import {
-  Avatar,
   PriorityBadge,
   StatusBadge,
   TypeBadge,
 } from "./ui";
 import { IconArrowRight } from "./Icons";
+import { AssigneeAvatars } from "./Assignees";
 import { RowCheck } from "./BulkStatus";
 
 export function TicketRow({
@@ -17,9 +17,7 @@ export function TicketRow({
 }: {
   ticket: Ticket;
   showProject?: boolean;
-  /** Router state for the link (e.g. backState(...) so the ticket page can offer "Back"). */
   linkState?: unknown;
-  /** Bulk-select checkbox; omit for people who can't change status. */
   select?: { checked: boolean; onToggle: () => void; disabled?: boolean };
 }) {
   const link = (
@@ -69,22 +67,8 @@ export function TicketRow({
       </div>
 
       <div className="flex items-center gap-4">
-        {ticket.assignee ? (
-          <div className="flex items-center gap-2.5">
-            <Avatar
-              name={ticket.assignee.name}
-              url={ticket.assignee.avatarUrl}
-              size={32}
-            />
-            <div className="hidden lg:block">
-              <div className="text-sm font-medium text-fg">
-                {ticket.assignee.name}
-              </div>
-              <div className="text-[11px] text-muted">
-                Assignee
-              </div>
-            </div>
-          </div>
+        {ticket.assignees?.length ? (
+          <AssigneeAvatars assignees={ticket.assignees} names />
         ) : (
           <span className="rounded-full border border-dashed border-card-border px-3 py-1 text-xs text-muted">
             Unassigned

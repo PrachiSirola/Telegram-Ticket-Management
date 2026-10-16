@@ -1,27 +1,45 @@
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../prisma.js";
+import { db, deleteCommentCascade, withTransaction } from "../db/index.js";
+import type { Comment } from "../db/types.js";
 import { requireAuth } from "../middleware/auth.js";
 import { isAdminOrAbove, isClient, isInternal } from "../lib/access.js";
 import { loadTicketForUser, rejectIfArchived } from "../lib/ticketAccess.js";
 import { deleteFile } from "../lib/storage.js";
 import { listNames, notify } from "../lib/notify.js";
-import { attachmentVisibleWhere } from "../lib/attachmentAccess.js";
+import { attachmentVisibleFilter } from "../lib/attachmentAccess.js";
+import { and } from "../lib/mongoFilters.js";
+import { usersById } from "../lib/hydrate.js";
 import { logActivity } from "../lib/activity.js";
 import { followerRecipients } from "../lib/followers.js";
 export const commentsRouter = Router({ mergeParams: true });
 
 const MAX_COMMENT_LENGTH = 10_000;
 
-const authorSelect = { select: { id: true, name: true, avatarUrl: true } };
-
-function attachmentsSelect(user: Parameters<typeof attachmentVisibleWhere>[0], orgId: string) {
-  return {
-    where: attachmentVisibleWhere(user, orgId),
-    select: { id: true, filename: true, mimeType: true, size: true, createdAt: true },
-    orderBy: { createdAt: "asc" as const },
-  };
+async function decorate(comments: Comment[], user: Parameters<typeof attachmentVisibleFilter>[0], orgId: string) {
+  if (comments.length === 0) return [];
+  const [authors, files] = await Promise.all([
+    usersById(comments.map((c) => c.authorId)),
+    attachmentVisibleFilter(user, orgId).then((visible) =>
+      db.attachments.find(and({ commentId: { $in: comments.map((c) => c.id) } }, visible), {
+        sort: { createdAt: 1, _id: 1 },
+        select: ["commentId", "filename", "mimeType", "size", "createdAt"],
+      }),
+    ),
+  ]);
+  return comments.map((c) => {
+    const a = authors.get(c.authorId);
+    return {
+      ...c,
+      author: a ? { id: a.id, name: a.name, avatarUrl: a.avatarUrl } : null,
+      attachments: files
+        .filter((f) => f.commentId === c.id)
+        .map((f) => ({ id: f.id, filename: f.filename, mimeType: f.mimeType, size: f.size, createdAt: f.createdAt })),
+    };
+  });
 }
+const decorateOne = async (c: Comment, user: Parameters<typeof attachmentVisibleFilter>[0], orgId: string) =>
+  (await decorate([c], user, orgId))[0];
 
 const PREVIEW_MIMES = new Set([
   "image/png",
@@ -54,14 +72,11 @@ commentsRouter.get("/", requireAuth, async (req, res) => {
   const user = req.user!;
   const orgId = ticket.project.orgId;
   const clientView = isClient(user, orgId);
-  const comments = await prisma.comment.findMany({
-    where: {
-      ticketId: ticket.id,
-      ...(clientView ? { visibility: "CLIENT_VISIBLE" } : {}),
-    },
-    include: { author: authorSelect, attachments: attachmentsSelect(user, orgId) },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  });
+  const rows = await db.comments.find(
+    { ticketId: ticket.id, ...(clientView ? { visibility: "CLIENT_VISIBLE" } : {}) },
+    { sort: { createdAt: 1, _id: 1 } },
+  );
+  const comments = await decorate(rows, user, orgId);
   const admin = isAdminOrAbove(user, orgId);
   res.json(comments.map((c) => serialize(c, user, admin, Boolean(ticket.archivedAt || ticket.project.archivedAt))));
 });
@@ -102,7 +117,7 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
     : "CLIENT_VISIBLE";
   let parentId: string | null = null;
   if (parsed.data.parentId) {
-    const parent = await prisma.comment.findUnique({ where: { id: parsed.data.parentId } });
+    const parent = await db.comments.byId(parsed.data.parentId);
     if (!parent || parent.ticketId !== ticket.id) {
       return res.status(400).json({ error: "Invalid parentId" });
     }
@@ -113,11 +128,11 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
     parentId = parent.parentId ?? parent.id;
   }
 
-  const comment = await prisma.$transaction(async (tx) => {
-    const created = await tx.comment.create({
-      data: { ticketId: ticket.id, authorId: user.id, body, visibility, parentId },
-      include: { author: authorSelect, attachments: attachmentsSelect(user, orgId) },
-    });
+  const comment = await withTransaction(async (tx) => {
+    const created = await db.comments.create(
+      { ticketId: ticket.id, authorId: user.id, body, visibility, parentId },
+      { session: tx },
+    );
     await logActivity(tx, {
       ticketId: ticket.id,
       actorId: user.id,
@@ -132,11 +147,9 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
     customerVisible: visibility === "CLIENT_VISIBLE",
   });
   const candidateIds = [
-    ...new Set([ticket.reporterId, ticket.assigneeId ?? "", ...mentions, ...followers].filter(Boolean)),
+    ...new Set([ticket.reporterId, ...ticket.assigneeIds, ...mentions, ...followers].filter(Boolean)),
   ];
-  const memberships = await prisma.orgMembership.findMany({
-    where: { orgId, userId: { in: candidateIds } },
-  });
+  const memberships = await db.memberships.find({ orgId, userId: { $in: candidateIds } });
   const clientIds = new Set(
     memberships.filter((m) => m.role === "CLIENT").map((m) => m.userId),
   );
@@ -144,10 +157,7 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
 
   const mentionIds = mentions.filter(canSee);
   if (mentionIds.length) {
-    const mentionedUsers = await prisma.user.findMany({
-      where: { id: { in: mentionIds } },
-      select: { name: true },
-    });
+    const mentionedUsers = await db.users.find({ _id: { $in: mentionIds } });
     await notify({
       recipientIds: mentionIds,
       type: "MENTIONED",
@@ -160,7 +170,7 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
     });
   }
 
-  const commentRecipients = [ticket.reporterId, ticket.assigneeId ?? "", ...followers]
+  const commentRecipients = [ticket.reporterId, ...ticket.assigneeIds, ...followers]
     .filter(Boolean)
     .filter((id) => canSee(id) && !mentionIds.includes(id));
   if (commentRecipients.length) {
@@ -174,7 +184,7 @@ commentsRouter.post("/", requireAuth, async (req, res) => {
     });
   }
 
-  res.status(201).json(serialize(comment, user, isAdminOrAbove(user, orgId), false));
+  res.status(201).json(serialize(await decorateOne(comment, user, orgId), user, isAdminOrAbove(user, orgId), false));
 });
 
 commentsRouter.patch("/:commentId", requireAuth, async (req, res) => {
@@ -183,7 +193,7 @@ commentsRouter.patch("/:commentId", requireAuth, async (req, res) => {
   if (rejectIfArchived(ticket, res)) return;
   const user = req.user!;
   const orgId = ticket.project.orgId;
-  const comment = await prisma.comment.findUnique({ where: { id: req.params.commentId } });
+  const comment = await db.comments.byId(req.params.commentId);
   if (
     !comment ||
     comment.ticketId !== ticket.id ||
@@ -199,18 +209,14 @@ commentsRouter.patch("/:commentId", requireAuth, async (req, res) => {
     return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid comment" });
   }
   if (parsed.data.body === comment.body) {
-    const same = await prisma.comment.findUnique({
-      where: { id: comment.id },
-      include: { author: authorSelect, attachments: attachmentsSelect(user, orgId) },
-    });
-    return res.json(serialize(same, user, isAdminOrAbove(user, orgId), false));
+    return res.json(serialize(await decorateOne(comment, user, orgId), user, isAdminOrAbove(user, orgId), false));
   }
-  const updated = await prisma.$transaction(async (tx) => {
-    const row = await tx.comment.update({
-      where: { id: comment.id },
-      data: { body: parsed.data.body, editedAt: new Date() },
-      include: { author: authorSelect, attachments: attachmentsSelect(user, orgId) },
-    });
+  const updated = await withTransaction(async (tx) => {
+    const row = await db.comments.mustUpdate(
+      { _id: comment.id },
+      { body: parsed.data.body, editedAt: new Date() },
+      { session: tx },
+    );
     await logActivity(tx, {
       ticketId: ticket.id,
       actorId: user.id,
@@ -221,13 +227,13 @@ commentsRouter.patch("/:commentId", requireAuth, async (req, res) => {
     });
     return row;
   });
-  res.json(serialize(updated, user, isAdminOrAbove(user, orgId), false));
+  res.json(serialize(await decorateOne(updated, user, orgId), user, isAdminOrAbove(user, orgId), false));
 });
 commentsRouter.delete("/:commentId", requireAuth, async (req, res) => {
   const ticket = await loadTicketForUser(req, res);
   if (!ticket) return;
   if (rejectIfArchived(ticket, res)) return;
-  const comment = await prisma.comment.findUnique({ where: { id: req.params.commentId } });
+  const comment = await db.comments.byId(req.params.commentId);
   const user = req.user!;
   if (
     !comment ||
@@ -240,17 +246,10 @@ commentsRouter.delete("/:commentId", requireAuth, async (req, res) => {
     return res.status(403).json({ error: "Can only delete your own comment" });
   }
 
-  const replies = await prisma.comment.findMany({
-    where: { parentId: comment.id },
-    select: { id: true },
-  });
-  const attachments = await prisma.attachment.findMany({
-    where: { commentId: { in: [comment.id, ...replies.map((r) => r.id)] } },
-    select: { storageKey: true },
-  });
+  const replies = await db.comments.find({ parentId: comment.id }, { select: ["id"] });
 
-  await prisma.$transaction(async (tx) => {
-    await tx.comment.delete({ where: { id: comment.id } });
+  const storageKeys = await withTransaction(async (tx) => {
+    const keys = await deleteCommentCascade(comment.id, { session: tx });
     await logActivity(tx, {
       ticketId: ticket.id,
       actorId: user.id,
@@ -259,8 +258,9 @@ commentsRouter.delete("/:commentId", requireAuth, async (req, res) => {
       meta: { commentId: comment.id, replies: replies.length },
       internalOnly: comment.visibility === "INTERNAL",
     });
+    return keys;
   });
-  for (const a of attachments) await deleteFile(a.storageKey);
+  for (const key of storageKeys) await deleteFile(key);
 
   res.json({ ok: true });
 });

@@ -10,7 +10,7 @@ import { useOrg } from "../org";
 import { TicketRow } from "../components/TicketRow";
 import { BulkStatusBar, useBulkSelect } from "../components/BulkStatus";
 import { listQuery, readProjectListMemory, writeProjectListMemory } from "../lib/projectListMemory";
-import { Dropdown } from "../components/Dropdown";
+import { Dropdown, MultiDropdown } from "../components/Dropdown";
 import { DatePicker } from "../components/DatePicker";
 import { DateRangeFilter, DATE_RANGE_URL_VALUES } from "../components/DateRangeFilter";
 import { TablePagination } from "../components/TablePagination";
@@ -33,7 +33,6 @@ import { todayStr } from "../lib/dateUtils";
 const STATUS_OPTS = ["OPEN", "IN_PROGRESS", "DONE"];
 const PRIORITY_OPTS = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 const TYPE_OPTS = ["BUG", "FEATURE", "TASK"];
-// "" (default) = active tickets only; the team can also look at archived ones.
 const ARCHIVED_OPTS = ["archived", "all"];
 const opt = (v: string) => ({ value: v, label: v.replace("_", " ") });
 
@@ -103,7 +102,7 @@ export default function Project() {
           else next.delete(k);
         }
         pendingView.current = listQuery(next, FILTER_KEYS);
-        setUrlParams(next, { replace: true, state: routeState }); // ONE update, so nothing is lost
+        setUrlParams(next, { replace: true, state: routeState }); 
       }
     }
     setDefaultsFor(projectId);
@@ -114,7 +113,7 @@ export default function Project() {
   useEffect(() => {
     if (!projectId || !activeOrgId || defaultsFor !== projectId) return;
     if (pendingView.current !== null) {
-      if (currentQuery !== pendingView.current) return; // URL hasn't caught up yet
+      if (currentQuery !== pendingView.current) return; 
       pendingView.current = null;
     }
     writeProjectListMemory(activeOrgId, projectId, currentQuery);
@@ -218,7 +217,6 @@ export default function Project() {
               setShowForm(false);
               setUploadNotice(failed ?? null);
               qc.invalidateQueries({ queryKey: ["tickets", activeOrgId, projectId] });
-              // A new ticket changes the project's open count (Dashboard order).
               qc.invalidateQueries({ queryKey: ["projects"] });
             }}
           />
@@ -374,7 +372,7 @@ export default function Project() {
                       : ""
                   }`}
                 >
-                  {/* Avatar */}
+
                   {m.avatarUrl ? (
                     <img
                       src={m.avatarUrl}
@@ -387,18 +385,18 @@ export default function Project() {
                     </span>
                   )}
 
-                  {/* Name + Email */}
+
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-medium text-fg">{m.name}</div>
                     <div className="truncate text-[11px] text-muted">{m.email}</div>
                   </div>
 
-                  {/* Role */}
+
                   <span className="eyebrow shrink-0">
                     {m.role === "SUPER_ADMIN" ? "Owner" : m.role.toLowerCase()}
                   </span>
 
-                  {/* Delete icon only for Developer / Client */}
+
                   {removable && (
                     <button
                       type="button"
@@ -534,11 +532,6 @@ function AddMemberModal({
               onChange={(e) => setQuery(e.target.value)}
             />
           )}
-          {/* Inline checklist, not a floating dropdown — a floating menu
-              would overlay the Cancel/Add buttons below it and, being
-              multi-select, never auto-closes after a pick. This scrolls
-              within its own fixed height instead, so the buttons always
-              stay visible and in normal document flow. */}
           <div className="max-h-56 overflow-y-auto rounded-xl border border-line">
             {visibleCandidates.length === 0 ? (
               <div className="px-3 py-3 text-sm text-muted">No matches</div>
@@ -622,7 +615,7 @@ function NewTicketForm({
   const [type, setType] = useState<TicketType>("TASK");
   const [priority, setPriority] = useState<TicketPriority>("MEDIUM");
   const [dueDate, setDueDate] = useState("");
-  const [assigneeId, setAssigneeId] = useState("");
+  const [assigneeIds, setAssigneeIds] = useState<string[]>([]);
   const [picked, setPicked] = useState<MentionMember[]>([]);
   const staged = useStagedFiles();
   const [vis, setVis] = useState<VisibilityValue>({
@@ -631,6 +624,13 @@ function NewTicketForm({
   });
   const [percent, setPercent] = useState(0);
   const [phase, setPhase] = useState<"ticket" | "files">("ticket");
+
+  const { data: assignableData } = useQuery({
+    queryKey: ["assignable", orgId, projectId],
+    queryFn: () => api.assignableMembers(orgId, projectId),
+    enabled: canAssign,
+  });
+  const assignable = assignableData ?? [];
 
   const mut = useMutation({
     mutationFn: async () => {
@@ -641,7 +641,7 @@ function NewTicketForm({
         type,
         priority,
         dueDate: dueDate ? new Date(dueDate).toISOString() : null,
-        assigneeId: assigneeId || null,
+        assigneeIds,
         mentions: extractMentionIds(description, picked),
       });
       if (staged.files.length === 0) return { ticket, failed: undefined };
@@ -661,7 +661,9 @@ function NewTicketForm({
     },
     meta: { errorTitle: "Couldn't create the ticket" },
     onSuccess: ({ ticket, failed }) => {
-      const who = assigneeId ? members.find((m) => m.userId === assigneeId)?.name : null;
+      const who = assigneeIds.length
+        ? assigneeIds.map((id) => assignable.find((m) => m.userId === id)?.name ?? "a member").join(", ")
+        : null;
       toast.success(
         `Ticket ${q(ticket.title)} was created${projectName ? ` in ${q(projectName)}` : ""}${who ? ` and assigned to ${who}` : ""}.`,
       );
@@ -680,7 +682,6 @@ function NewTicketForm({
     role: m.role,
   }));
 
-  const assignable = members.filter((m) => m.role !== "CLIENT");
   const mentionables: MentionMember[] = members.map((m) => ({ id: m.userId, name: m.name }));
 
   return (
@@ -725,15 +726,12 @@ function NewTicketForm({
           onChange={setDueDate}
         />
         {canAssign && (
-          <Dropdown
-            className="w-44"
+          <MultiDropdown
+            className="w-56"
             placeholder="Unassigned"
-            value={assigneeId}
-            onChange={setAssigneeId}
-            options={[
-              { value: "", label: "Unassigned" },
-              ...assignable.map((m) => ({ value: m.userId, label: m.name })),
-            ]}
+            values={assigneeIds}
+            onChange={setAssigneeIds}
+            options={assignable.map((m) => ({ value: m.userId, label: m.name }))}
           />
         )}
       </div>

@@ -1,8 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
-import { prisma } from "../prisma.js";
+import { db } from "../db/index.js";
 import { requireAuth } from "../middleware/auth.js";
-import { canAccessOrg, isClient, membershipIn, orgRole } from "../lib/access.js";
+import { canAccessOrg } from "../lib/access.js";
 import {
   passwordContainsIdentityError,
   passwordStrengthError,
@@ -11,40 +11,27 @@ import {
 } from "../lib/password.js";
 import { changePasswordWithHistory } from "../lib/credentialHistory.js";
 import { passwordChangedEmail, sendEmail } from "../lib/email.js";
-import { developerVisibleProjectsWhere } from "../lib/projectAccess.js";
+import { scopedProjectIds } from "../lib/projectAccess.js";
+import { contains } from "../lib/mongoFilters.js";
+import { hydrateTickets } from "../lib/hydrate.js";
+import { queryTickets } from "../lib/ticketQuery.js";
 import { parseDueRange } from "../lib/dueRange.js";
 import { listAssigners, ticketIdsAssignedBy, withAssignmentInfo } from "../lib/assignedBy.js";
 import { dueDateFilter, isValidYmd, resolveWorkRange, ymdInZone, WORK_RANGES, type WorkRange } from "../lib/dateRanges.js";
-import {
-  countCompletedInRange,
-  fetchCompletedWork,
-  serializeTicket,
-  workTicketInclude,
-} from "../lib/myWork.js";
+import { countCompletedInRange, fetchCompletedWork, serializeTicket } from "../lib/myWork.js";
 import { setPin, pinFormatError, PinReuseError } from "../lib/twoFactor.js";
 import { authenticatorRouter } from "./authenticator.js";
-import {
-  paginate,
-  parsePageParams,
-  TICKET_TIEBREAK,
-  wantsPagination,
-} from "../lib/pagination.js";
+import { paginate, parsePageParams, wantsPagination } from "../lib/pagination.js";
 
 export const meRouter = Router();
-
-const userSelect = { select: { id: true, name: true, email: true, avatarUrl: true } };
 
 const profileSchema = z.object({ name: z.string().min(1).max(100) });
 
 meRouter.patch("/profile", requireAuth, async (req, res) => {
   const parsed = profileSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Name is required." });
-  const user = await prisma.user.update({
-    where: { id: req.user!.id },
-    data: { name: parsed.data.name.trim() },
-    select: { id: true, name: true, email: true, avatarUrl: true },
-  });
-  res.json(user);
+  const user = await db.users.mustUpdate({ _id: req.user!.id }, { name: parsed.data.name.trim() });
+  res.json({ id: user.id, name: user.name, email: user.email, avatarUrl: user.avatarUrl });
 });
 
 const changePasswordSchema = z.object({
@@ -60,7 +47,7 @@ meRouter.post("/change-password", requireAuth, async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid input" });
   }
-  const current = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+  const current = await db.users.mustById(req.user!.id);
   const ok = await verifyPassword(parsed.data.currentPassword, current.passwordHash);
   if (!ok) return res.status(400).json({ error: "Current password is incorrect." });
 
@@ -104,45 +91,25 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
     return res.status(404).json({ error: "Organisation not found" });
   }
 
-  const projectScope = isClient(user, orgId)
-    ? {
-        project: {
-          orgId,
-          archivedAt: null,
-          clients: { some: { membershipId: membershipIn(user, orgId)!.id } },
-        },
-      }
-    : { project: { orgId, archivedAt: null } };
-
-  const who = filter === "reported" ? { reporterId: user.id } : { assigneeId: user.id };
+  const projectIds = await scopedProjectIds(user, orgId, { archivedAt: null });
+  const who = filter === "reported" ? { reporterId: user.id } : { assigneeIds: user.id };
 
   const filters = myTicketsFilterSchema.safeParse(req.query);
   if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
   const { status, priority } = filters.data;
 
-  const orgRow = await prisma.organization.findUnique({ where: { id: orgId }, select: { timezone: true } });
+  const orgRow = await db.orgs.byId(orgId);
   const due = parseDueRange(req.query, orgRow?.timezone);
   if (!due.ok) return res.status(400).json({ error: due.error });
 
   const where = {
-    ...projectScope,
+    projectId: { $in: projectIds },
     ...who,
     archivedAt: null,
     ...(status ? { status } : {}),
     ...(priority ? { priority } : {}),
     ...due.where,
   };
-  const include = {
-    assignee: userSelect,
-    reporter: userSelect,
-    project: { select: { id: true, name: true, orgId: true } },
-  };
-
-  const orderBy = [
-    { dueDate: "asc" as const },
-    { updatedAt: "desc" as const },
-    TICKET_TIEBREAK,
-  ];
   const shape = (t: any) => ({
     ...t,
     orgId: t.project.orgId,
@@ -150,14 +117,14 @@ meRouter.get("/tickets", requireAuth, async (req, res) => {
   });
 
   if (!wantsPagination(req.query)) {
-    const tickets = await prisma.ticket.findMany({ where, include, orderBy });
+    const tickets = await hydrateTickets(await queryTickets(where, "due"));
     return res.json(tickets.map(shape));
   }
 
   const paged = await paginate(
     parsePageParams(req.query),
-    () => prisma.ticket.count({ where }),
-    (skip, take) => prisma.ticket.findMany({ where, include, orderBy, skip, take }),
+    () => db.tickets.count(where),
+    async (skip, take) => hydrateTickets(await queryTickets(where, "due", { skip, take })),
   );
   res.json({ ...paged, items: paged.items.map(shape) });
 });
@@ -185,7 +152,7 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   if (priorityParam && !["LOW", "MEDIUM", "HIGH", "URGENT"].includes(priorityParam)) {
     return res.status(400).json({ error: "Invalid priority" });
   }
-  const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { timezone: true } });
+  const org = await db.orgs.byId(orgId);
   const timezone = org?.timezone ?? "UTC";
   const window = resolveWorkRange(range, { from, to }, timezone);
 
@@ -201,55 +168,39 @@ meRouter.get("/work", requireAuth, async (req, res) => {
     Math.max(1, parseInt(String(req.query.completedPageSize ?? "15"), 10) || 15),
   );
 
-  let projectScope: Record<string, unknown> = {};
-  if (isClient(user, orgId)) {
-    projectScope = { clients: { some: { membershipId: membershipIn(user, orgId)!.id } } };
-  } else if (orgRole(user, orgId) === "DEVELOPER") {
-    projectScope = developerVisibleProjectsWhere(user.id, membershipIn(user, orgId)!.id);
-  }
-  if (projectId) projectScope = { ...projectScope, id: projectId };
-  projectScope = { ...projectScope, archivedAt: null };
+  let projectIds = await scopedProjectIds(user, orgId, { archivedAt: null });
+  if (projectId) projectIds = projectIds.filter((id) => id === projectId);
 
   const overdueBefore = new Date(`${ymdInZone(new Date(), timezone)}T00:00:00Z`);
 
   const assignedByParam = req.query.assignedBy ? String(req.query.assignedBy) : undefined;
   const assignedByIds = assignedByParam ? await ticketIdsAssignedBy(user.id, assignedByParam) : undefined;
-  const searchWhere = {
-    ...(assignedByIds ? { id: { in: assignedByIds } } : {}),
-    ...(q
-      ? {
-          OR: [
-            { title: { contains: q, mode: "insensitive" as const } },
-            { description: { contains: q, mode: "insensitive" as const } },
-          ],
-        }
-      : {}),
+  const searchWhere: Record<string, unknown> = {
+    ...(assignedByIds ? { _id: { $in: assignedByIds } } : {}),
+    ...(q ? { $or: [{ title: contains(q) }, { description: contains(q) }] } : {}),
     ...(priorityParam ? { priority: priorityParam } : {}),
   };
   const dueDateWhere = dueDateFilter(window);
   const baseWhere = {
-    assigneeId: user.id,
+    assigneeIds: user.id,
     archivedAt: null,
-    project: { orgId, ...projectScope },
+    projectId: { $in: projectIds },
     ...searchWhere,
     ...dueDateWhere,
   };
 
-  const completedScope = { orgId, userId: user.id, projectScope, searchWhere, window };
+  const completedScope = { orgId, userId: user.id, projectIds, searchWhere, window };
   const [assignedCount, openCount, inProgressCount, overdueCount, completedCount] = await Promise.all([
-    prisma.ticket.count({ where: baseWhere as any }),
-
-    prisma.ticket.count({ where: { ...baseWhere, status: "OPEN" } as any }),
-    prisma.ticket.count({ where: { ...baseWhere, status: "IN_PROGRESS" } as any }),
-    prisma.ticket.count({
-      where: {
-        assigneeId: user.id,
-        archivedAt: null,
-        project: { orgId, ...projectScope },
-        ...searchWhere,
-        status: { not: "DONE" },
-        dueDate: { lt: overdueBefore },
-      } as any,
+    db.tickets.count(baseWhere),
+    db.tickets.count({ ...baseWhere, status: "OPEN" }),
+    db.tickets.count({ ...baseWhere, status: "IN_PROGRESS" }),
+    db.tickets.count({
+      assigneeIds: user.id,
+      archivedAt: null,
+      projectId: { $in: projectIds },
+      ...searchWhere,
+      status: { $ne: "DONE" },
+      dueDate: { $lt: overdueBefore },
     }),
     countCompletedInRange(completedScope),
   ]);
@@ -259,7 +210,7 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   if (statusFilter === "pending" || statusFilter === "open") statusWhere = { status: "OPEN" };
   else if (statusFilter === "in_progress") statusWhere = { status: "IN_PROGRESS" };
   else if (statusFilter === "completed") statusWhere = { status: "DONE" };
-  else if (statusFilter === "overdue") statusWhere = { status: { not: "DONE" }, dueDate: { lt: overdueBefore } };
+  else if (statusFilter === "overdue") statusWhere = { status: { $ne: "DONE" }, dueDate: { $lt: overdueBefore } };
 
   let work: { items: unknown[]; total: number; page: number; pageSize: number };
   if (statusFilter === "completed") {
@@ -270,15 +221,9 @@ meRouter.get("/work", requireAuth, async (req, res) => {
       statusFilter === "overdue"
         ? { ...baseNoDue, ...statusWhere }
         : { ...baseWhere, ...statusWhere };
-    const [workItems, workTotal] = await prisma.$transaction([
-      prisma.ticket.findMany({
-        where: workWhere as any,
-        include: workTicketInclude,
-        orderBy: [{ dueDate: "asc" }, { updatedAt: "desc" }, TICKET_TIEBREAK],
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-      }),
-      prisma.ticket.count({ where: workWhere as any }),
+    const [workItems, workTotal] = await Promise.all([
+      queryTickets(workWhere, "due", { skip: (page - 1) * pageSize, take: pageSize }).then(hydrateTickets),
+      db.tickets.count(workWhere),
     ]);
     work = { items: workItems.map(serializeTicket), total: workTotal, page, pageSize };
   }
@@ -291,12 +236,11 @@ meRouter.get("/work", requireAuth, async (req, res) => {
   work.items = await withAssignmentInfo(work.items as any[]);
   completedWork.items = await withAssignmentInfo(completedWork.items as any[]);
 
-  const myTicketIds = (
-    await prisma.ticket.findMany({
-      where: { assigneeId: user.id, archivedAt: null, project: { orgId, ...projectScope } } as any,
-      select: { id: true },
-    })
-  ).map((t) => t.id);
+  const myTicketIds = await db.tickets.distinct("_id", {
+    assigneeIds: user.id,
+    archivedAt: null,
+    projectId: { $in: projectIds },
+  });
   const assigners = await listAssigners(myTicketIds);
 
   res.json({
@@ -315,59 +259,46 @@ meRouter.get("/work", requireAuth, async (req, res) => {
 });
 
 meRouter.get("/notifications", requireAuth, async (req, res) => {
-  const notifications = await prisma.notification.findMany({
-    where: { userId: req.user!.id },
-    include: {
-      ticket: {
-        select: {
-          id: true,
-          title: true,
-          projectId: true,
-          project: { select: { name: true, orgId: true, org: { select: { name: true } } } },
-        },
-      },
-    },
-    orderBy: { createdAt: "desc" },
-    take: 50,
-  });
+  const notifications = await db.notifications.find(
+    { userId: req.user!.id },
+    { sort: { createdAt: -1, _id: -1 }, limit: 50 },
+  );
+  const tickets = await db.tickets.find({ _id: { $in: [...new Set(notifications.map((n) => n.ticketId))] } });
+  const projects = await db.projects.find({ _id: { $in: [...new Set(tickets.map((t) => t.projectId))] } });
+  const orgs = await db.orgs.find({ _id: { $in: [...new Set(projects.map((p) => p.orgId))] } });
+  const ticketById = new Map(tickets.map((t) => [t.id, t]));
+  const projectById = new Map(projects.map((p) => [p.id, p]));
+  const orgById = new Map(orgs.map((o) => [o.id, o]));
   const unread = notifications.filter((n) => !n.isRead).length;
   res.json({
     unread,
-    notifications: notifications.map((n) => ({
-      ...n,
-      ticket: {
-        id: n.ticket.id,
-        title: n.ticket.title,
-        projectId: n.ticket.projectId,
-        orgId: n.ticket.project.orgId,
-        orgName: n.ticket.project.org.name,
-      },
-    })),
+    notifications: notifications.flatMap((n) => {
+      const t = ticketById.get(n.ticketId);
+      const p = t && projectById.get(t.projectId);
+      if (!t || !p) return [];
+      return [
+        {
+          ...n,
+          ticket: { id: t.id, title: t.title, projectId: t.projectId, orgId: p.orgId, orgName: orgById.get(p.orgId)?.name ?? "" },
+        },
+      ];
+    }),
   });
 });
 
 meRouter.post("/notifications/:id/read", requireAuth, async (req, res) => {
-  await prisma.notification.updateMany({
-    where: { id: req.params.id, userId: req.user!.id },
-    data: { isRead: true },
-  });
+  await db.notifications.updateMany({ _id: req.params.id, userId: req.user!.id }, { isRead: true });
   res.json({ ok: true });
 });
 
 meRouter.post("/notifications/read-all", requireAuth, async (req, res) => {
-  await prisma.notification.updateMany({
-    where: { userId: req.user!.id, isRead: false },
-    data: { isRead: true },
-  });
+  await db.notifications.updateMany({ userId: req.user!.id, isRead: false }, { isRead: true });
   res.json({ ok: true });
 });
 
 
 meRouter.get("/2fa", requireAuth, async (req, res) => {
-  const user = await prisma.user.findUniqueOrThrow({
-    where: { id: req.user!.id },
-    select: { twoFactorEnabled: true, twoFactorMethod: true, pinHash: true },
-  });
+  const user = await db.users.mustById(req.user!.id);
   res.json({
     twoFactorEnabled: user.twoFactorEnabled,
     twoFactorMethod: user.twoFactorMethod,
@@ -393,7 +324,7 @@ meRouter.post("/2fa/pin", requireAuth, async (req, res) => {
   const formatErr = pinFormatError(pin);
   if (formatErr) return res.status(400).json({ error: formatErr });
 
-  const current = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+  const current = await db.users.mustById(req.user!.id);
   const ok = await verifyPassword(currentPassword, current.passwordHash);
   if (!ok) return res.status(400).json({ error: "Current password is incorrect." });
 
@@ -423,7 +354,7 @@ meRouter.post("/2fa/toggle", requireAuth, async (req, res) => {
 
   if (enabled) {
     if (method === "PIN") {
-      const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+      const user = await db.users.mustById(req.user!.id);
       if (!user.pinHash) return res.status(400).json({ error: "Set a PIN before enabling it." });
     } else if (method === "PASSKEY") {
       return res.status(400).json({ error: "Passkey 2FA isn't available yet." });
@@ -432,10 +363,9 @@ meRouter.post("/2fa/toggle", requireAuth, async (req, res) => {
     }
   }
 
-  const user = await prisma.user.update({
-    where: { id: req.user!.id },
-    data: { twoFactorEnabled: enabled, twoFactorMethod: enabled ? method : null },
-    select: { twoFactorEnabled: true, twoFactorMethod: true },
-  });
-  res.json(user);
+  const user = await db.users.mustUpdate(
+    { _id: req.user!.id },
+    { twoFactorEnabled: enabled, twoFactorMethod: enabled ? method : null },
+  );
+  res.json({ twoFactorEnabled: user.twoFactorEnabled, twoFactorMethod: user.twoFactorMethod });
 });

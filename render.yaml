@@ -1,29 +1,23 @@
-# Render Blueprint — FREE-TIER DEMO deploy: Postgres + API + static frontend.
+# Render Blueprint — FREE-TIER DEMO deploy: MongoDB Atlas + API + static frontend.
 # Docs: https://render.com/docs/blueprint-spec
 #
 # Free-tier notes:
 #   - The API spins down after ~15 min idle (~50s cold start). Hit its URL a
 #     minute before demoing to warm it up.
 #   - Filesystem is ephemeral: uploaded attachments reset on restart. Fine for a demo.
-#   - Free Postgres expires 30 days after creation.
+#   - Render has no managed MongoDB: create a free MongoDB Atlas (M0) cluster and paste its
+#     connection string into MONGODB_URI below. Atlas clusters are replica sets, so transactions work.
 #   - No Pre-Deploy step or Shell on free tier, so migrations + seed run in the
 #     build command below (both are idempotent, safe to repeat every deploy).
 #
-# IMPORTANT (multi-org pivot): the Prisma migration history was reset to a
-# single fresh `init` migration. An existing Render database created from the
-# OLD migrations will fail `prisma migrate deploy`. Delete and recreate the
-# ticket-mgmt-db database (free-tier DBs are disposable) before redeploying.
+# Data migration: to move an existing PostgreSQL database into MongoDB run
+# `npm --workspace backend run db:migrate-from-postgres` once (see MONGODB_MIGRATION.md).
 #
 # One-time setup after the first deploy (values marked `sync: false`):
+#   - API  MONGODB_URI         = your Atlas connection string (mongodb+srv://...)
 #   - API  FRONTEND_URL        = https://ticket-mgmt-web.onrender.com
 #   - Web  VITE_API_URL        = https://ticket-mgmt-api.onrender.com  (then redeploy Web)
 #   Telegram is configured per organisation in-app (Org Settings), not via env.
-
-databases:
-  - name: ticket-mgmt-db
-    databaseName: ticket_mgmt
-    user: ticket
-    plan: free # expires 30 days after creation
 
 services:
   # ---- Backend API (Node) ----
@@ -31,25 +25,21 @@ services:
     name: ticket-mgmt-api
     runtime: node
     plan: free
-    # migrate + seed folded into build (no Pre-Deploy/Shell on free tier); both idempotent
+    # indexes + seed folded into build (no Pre-Deploy/Shell on free tier); both idempotent
     # --include=dev: NODE_ENV=production (set below, needed at runtime) would
-    # otherwise make npm skip devDependencies — but the build needs tsc, prisma,
-    # tsx and the @types/*. Force them in for the build only.
+    # otherwise make npm skip devDependencies — but the build needs tsc, tsx
+    # and the @types/*. Force them in for the build only.
     buildCommand: >-
       npm install --include=dev &&
-      npm --workspace backend run prisma:generate &&
       npm --workspace backend run build &&
-      npm --workspace backend run prisma:deploy &&
       npm --workspace backend run db:seed
     startCommand: npm --workspace backend run start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: ticket-mgmt-db
-          property: connectionString
+      - key: MONGODB_URI
+        sync: false # MongoDB Atlas connection string
       - key: JWT_SECRET
         generateValue: true
       - key: FRONTEND_URL
