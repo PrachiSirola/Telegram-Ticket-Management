@@ -55,6 +55,7 @@ export const api = {
     http.post("/auth/login", data).then((r) => r.data),
   logout: () => http.post("/auth/logout").then((r) => r.data),
 
+  // Organisation signup (open, OTP-verified)
   signup: (data: { orgName: string; name: string; email: string; password: string }) =>
     http.post("/auth/signup", data).then((r) => r.data),
   verifySignup: (data: { email: string; code: string }) =>
@@ -110,21 +111,23 @@ export const api = {
   updateMember: (
     orgId: string,
     userId: string,
+
     data: { role?: "ADMIN" | "DEVELOPER" | "CLIENT"; disabled?: boolean; confirmName?: string },
   ) => http.patch(`/orgs/${orgId}/members/${userId}`, data).then((r) => r.data),
+  // The server requires the member's exact name as confirmation.
   removeMember: (orgId: string, userId: string, confirmName: string) =>
     http.delete(`/orgs/${orgId}/members/${userId}`, { data: { confirmName } }).then((r) => r.data),
   memberImpact: (orgId: string, userId: string) =>
     http
       .get<{ projects: number; openAssignedTickets: number }>(`/orgs/${orgId}/members/${userId}/impact`)
       .then((r) => r.data),
-  // Member Detail page: profile + project access + assigned-ticket breakdown.
+
   memberDetail: (orgId: string, userId: string) =>
     http.get(`/orgs/${orgId}/members/${userId}/detail`).then((r) => r.data),
   memberTickets: (
     orgId: string,
     userId: string,
-    params: { status?: string; priority?: string; type?: string; page: number; pageSize: number },
+    params: { status?: string; priority?: string; type?: string; range?: string; from?: string; to?: string; page: number; pageSize: number },
   ) =>
     http
       .get<TicketPage<Ticket>>(`/orgs/${orgId}/members/${userId}/tickets`, { params })
@@ -144,6 +147,7 @@ export const api = {
   resendInvite: (orgId: string, inviteId: string) =>
     http.post(`/orgs/${orgId}/invites/${inviteId}/resend`).then((r) => r.data),
 
+  // --- Projects ---
   projects: (orgId: string) =>
     http.get<Project[]>(`/orgs/${orgId}/projects`).then((r) => r.data),
 
@@ -194,10 +198,10 @@ export const api = {
     http.get<{ twoFactorEnabled: boolean; twoFactorMethod: "PIN" | "PASSKEY" | null; hasPin: boolean }>("/me/2fa").then((r) => r.data),
   setPin: (data: { currentPassword: string; pin: string; confirmPin: string }) =>
     http.post("/me/2fa/pin", data).then((r) => r.data),
-  toggle2fa: (data: { enabled: boolean; method?: "PIN" | "PASSKEY" }) =>
+  toggle2fa: (data: { enabled: boolean; method?: "PIN" | "PASSKEY"; currentPassword: string }) =>
     http.post("/me/2fa/toggle", data).then((r) => r.data),
   verify2fa: (pin: string) => http.post("/auth/2fa/verify", { pin }).then((r) => r.data),
-  /** "Try another way" at the passkey step — a 6-digit authenticator code. */
+
   verifyAuthenticator: (code: string) =>
     http.post("/auth/2fa/authenticator", { code }).then((r) => r.data as { ok: true }),
   // --- Authenticator app (TOTP) ---
@@ -350,7 +354,7 @@ export const api = {
   restoreTicket: (ticketId: string) =>
     http.post(`/tickets/${ticketId}/restore`).then((r) => r.data),
 
-
+  // --- Me / notifications ---
   myTickets: (orgId: string, filter: "assigned" | "reported" = "assigned") =>
     http.get<Ticket[]>("/me/tickets", { params: { orgId, filter } }).then((r) => r.data),
   myTicketsPaged: (

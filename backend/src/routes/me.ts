@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { z } from "zod";
 import { db } from "../db/index.js";
 import { requireAuth } from "../middleware/auth.js";
@@ -168,6 +169,7 @@ meRouter.get("/work", requireAuth, async (req, res) => {
     Math.max(1, parseInt(String(req.query.completedPageSize ?? "15"), 10) || 15),
   );
 
+
   let projectIds = await scopedProjectIds(user, orgId, { archivedAt: null });
   if (projectId) projectIds = projectIds.filter((id) => id === projectId);
 
@@ -309,13 +311,24 @@ meRouter.get("/2fa", requireAuth, async (req, res) => {
 
 meRouter.use("/2fa/authenticator", authenticatorRouter);
 
+
+const pinActionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: Number(process.env.PIN_ACTION_RATE_LIMIT) || 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => `user:${req.user?.id ?? ipKeyGenerator(req.ip ?? "")}`,
+  message: { error: "Too many attempts. Please try again later." },
+});
+
 const setPinSchema = z.object({
   currentPassword: z.string().min(1),
   pin: z.string().min(1),
   confirmPin: z.string().min(1),
 });
 
-meRouter.post("/2fa/pin", requireAuth, async (req, res) => {
+meRouter.post("/2fa/pin", requireAuth, pinActionLimiter, async (req, res) => {
   const parsed = setPinSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
   const { currentPassword, pin, confirmPin } = parsed.data;
@@ -345,16 +358,26 @@ meRouter.post("/2fa/pin", requireAuth, async (req, res) => {
 const toggleSchema = z.object({
   enabled: z.boolean(),
   method: z.enum(["PIN", "PASSKEY"]).optional(),
+  currentPassword: z.string().min(1).max(1000),
 });
 
-meRouter.post("/2fa/toggle", requireAuth, async (req, res) => {
+
+meRouter.post("/2fa/toggle", requireAuth, pinActionLimiter, async (req, res) => {
   const parsed = toggleSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid input" });
-  const { enabled, method } = parsed.data;
+  if (!parsed.success) {
+    const missingPassword = !req.body || typeof req.body.currentPassword !== "string" || req.body.currentPassword === "";
+    return res.status(400).json({ error: missingPassword ? "Enter your current password." : "Invalid input" });
+  }
+  const { enabled, method, currentPassword } = parsed.data;
+
+  const account = await db.users.mustById(req.user!.id);
+  if (!(await verifyPassword(currentPassword, account.passwordHash))) {
+    return res.status(400).json({ error: "Current password is incorrect." });
+  }
 
   if (enabled) {
     if (method === "PIN") {
-      const user = await db.users.mustById(req.user!.id);
+      const user = account;
       if (!user.pinHash) return res.status(400).json({ error: "Set a PIN before enabling it." });
     } else if (method === "PASSKEY") {
       return res.status(400).json({ error: "Passkey 2FA isn't available yet." });

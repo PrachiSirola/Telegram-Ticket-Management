@@ -23,3 +23,23 @@ export function listQuery(params: URLSearchParams, filterKeys: readonly string[]
   }
   return out.toString();
 }
+
+
+
+const memberKey = (orgId: string, userId: string) => `tm_member_list:${orgId}:${userId}`;
+
+export function readMemberListMemory(orgId: string, userId: string): string | null {
+  try {
+    return sessionStorage.getItem(memberKey(orgId, userId));
+  } catch {
+    return null;
+  }
+}
+
+export function writeMemberListMemory(orgId: string, userId: string, query: string) {
+  try {
+    sessionStorage.setItem(memberKey(orgId, userId), query);
+  } catch {
+    /* only a convenience */
+  }
+}

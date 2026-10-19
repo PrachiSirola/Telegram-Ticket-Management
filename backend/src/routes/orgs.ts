@@ -17,6 +17,7 @@ import { deleteTicketFiles } from "../lib/storage.js";
 import { contains, OPEN_STATUSES } from "../lib/mongoFilters.js";
 import { hydrateTickets } from "../lib/hydrate.js";
 import { paginate, parsePageParams } from "../lib/pagination.js";
+import { parseDueRange } from "../lib/dueRange.js";
 
 export const orgsRouter = Router();
 function mask(secret: string | null): string | null {
@@ -170,6 +171,7 @@ orgsRouter.post(
     if (!target || target.disabled || target.role !== "ADMIN") {
       return res.status(400).json({ error: "Ownership can only be transferred to an active Admin" });
     }
+    // Demote first, then promote: the "one Super Admin per org" index never sees two.
     await withTransaction(async (session) => {
       await db.memberships.mustUpdate({ userId: req.user!.id, orgId }, { role: "ADMIN" }, { session });
       await db.memberships.mustUpdate({ _id: target.id }, { role: "SUPER_ADMIN" }, { session });
@@ -329,6 +331,10 @@ orgsRouter.get(
     if (!filters.success) return res.status(400).json({ error: "Invalid filter value" });
     const { status, priority, type } = filters.data;
 
+    const org = await db.orgs.byId(orgId);
+    const due = parseDueRange(req.query, org?.timezone);
+    if (!due.ok) return res.status(400).json({ error: due.error });
+
     const liveProjectIds = await db.projects.distinct("_id", { orgId, archivedAt: null });
     const where = {
       assigneeIds: req.params.userId,
@@ -337,6 +343,7 @@ orgsRouter.get(
       ...(status ? { status } : {}),
       ...(priority ? { priority } : {}),
       ...(type ? { type } : {}),
+      ...due.where,
     };
     const paged = await paginate(
       parsePageParams(req.query, 10),

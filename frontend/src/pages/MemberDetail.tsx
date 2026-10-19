@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, Navigate, useLocation, useParams } from "react-router-dom";
+import { Link, Navigate, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { isAdminOrAboveIn, useAuth } from "../auth";
 import { useOrg } from "../org";
 import { Avatar } from "../components/ui";
 import { Dropdown } from "../components/Dropdown";
+import { DateRangeFilter, DATE_RANGE_URL_VALUES } from "../components/DateRangeFilter";
 import { TablePagination } from "../components/TablePagination";
 import { useListParams } from "../lib/useListParams";
+import { listQuery, readMemberListMemory, writeMemberListMemory } from "../lib/projectListMemory";
+import type { WorkRange } from "../types";
 import { TicketRow } from "../components/TicketRow";
 import { BulkStatusBar, useBulkSelect } from "../components/BulkStatus";
 import { backState } from "../components/BackLink";
@@ -16,19 +19,25 @@ import { IconArrowLeft, IconFolder, IconTicket, IconClock, IconCheckCircle } fro
 const STATUS_OPTS = ["OPEN", "IN_PROGRESS", "DONE"];
 const PRIORITY_OPTS = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 const TYPE_OPTS = ["BUG", "FEATURE", "TASK"];
+
+const FILTER_KEYS = ["status", "priority", "type", "range", "from", "to"];
+
+const DEFAULT_VIEW = "status=OPEN&range=today";
 const opt = (v: string) => ({ value: v, label: v.replace("_", " ") });
 
 export default function MemberDetail() {
   const { userId = "" } = useParams();
   const { me } = useAuth();
-  const { activeOrgId } = useOrg();
+  const { activeOrgId, activeOrg } = useOrg();
   const admin = isAdminOrAboveIn(me, activeOrgId);
 
-  // Filters, page and page size live in the URL; changing a filter or the
-  // page size returns to page 1 (page size is kept).
+
   const { filters, page, pageSize, setFilter, setFilters, setPage, setPageSize, clearFilters } = useListParams({
-    filters: { status: STATUS_OPTS, priority: PRIORITY_OPTS, type: TYPE_OPTS },
+    filters: { status: STATUS_OPTS, priority: PRIORITY_OPTS, type: TYPE_OPTS, range: DATE_RANGE_URL_VALUES },
+    dateKeys: ["from", "to"],
   });
+  const [defaultsFor, setDefaultsFor] = useState("");
+  const [urlParams, setUrlParams] = useSearchParams();
   const listTop = useRef<HTMLDivElement>(null);
   const projectsRef = useRef<HTMLElement>(null);
   const [flashProjects, setFlashProjects] = useState(false);
@@ -56,8 +65,9 @@ export default function MemberDetail() {
         page,
         pageSize,
       }),
-    enabled: !!activeOrgId && !!userId && admin,
-    // Keep current rows (dimmed) while the next page loads — but not across members.
+
+    enabled: !!activeOrgId && !!userId && admin && defaultsFor === userId,
+
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[2] === userId ? prev : undefined),
   });
   const hasFilters = Object.keys(activeFilters).length > 0;
@@ -65,22 +75,53 @@ export default function MemberDetail() {
     admin ? paged?.items.filter((t: any) => !t.archivedAt).map((t: any) => ({ id: t.id, title: t.title })) : undefined,
   );
 
-  // Server clamps an out-of-range page to the last page; mirror it into the URL.
-  // Skip while `paged` is only placeholder data from the previous page —
-  // that would look like a clamp and bounce the user straight back.
+
+  const pendingView = useRef<string | null>(null);
+  useEffect(() => {
+    if (!admin || !activeOrgId || !userId || defaultsFor === userId) return;
+    const urlHasView = FILTER_KEYS.some((k) => urlParams.get(k)) || urlParams.has("page");
+    if (!urlHasView) {
+      const remembered = readMemberListMemory(activeOrgId, userId);
+      const view = remembered === null ? DEFAULT_VIEW : remembered;
+      if (view !== "") {
+        const saved = new URLSearchParams(view);
+        const next = new URLSearchParams(urlParams);
+        for (const k of [...FILTER_KEYS, "page"]) {
+          const v = saved.get(k);
+          if (v) next.set(k, v);
+          else next.delete(k);
+        }
+        pendingView.current = listQuery(next, FILTER_KEYS);
+        setUrlParams(next, { replace: true, state: location.state }); 
+      }
+    }
+    setDefaultsFor(userId);
+
+  }, [admin, activeOrgId, userId, defaultsFor]);
+
+
+  const currentQuery = listQuery(urlParams, FILTER_KEYS);
+  useEffect(() => {
+    if (!admin || !activeOrgId || !userId || defaultsFor !== userId) return;
+    if (pendingView.current !== null) {
+      if (currentQuery !== pendingView.current) return; 
+      pendingView.current = null;
+    }
+    writeMemberListMemory(activeOrgId, userId, currentQuery);
+  }, [admin, activeOrgId, userId, defaultsFor, currentQuery]);
+
+
   useEffect(() => {
     if (paged && !isPlaceholderData && paged.page !== page) setPage(paged.page, { replace: true });
   }, [paged, isPlaceholderData, page, setPage]);
 
-  // Everything opened from this page carries "Back to <member>" (with the exact
-  // filters/page the admin was looking at) in its router state.
+
   const here = backState({ path: `${location.pathname}${location.search}`, label: detail?.name ?? "member" });
 
-  // Summary cards. The ticket cards reuse the page's own status filter (and
-  // clear priority/type so the list always matches the number on the card);
-  // the Projects card jumps to the project chips.
+
   function showTickets(status: string) {
-    setFilters({ status, priority: "", type: "" });
+
+    setFilters({ status, priority: "", type: "", range: "", from: "", to: "" });
     window.setTimeout(() => listTop.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   }
   function showProjects() {
@@ -179,6 +220,13 @@ export default function MemberDetail() {
                     options={[{ value: "", label: `All ${key}` }, ...opts.map(opt)]}
                   />
                 ))}
+                <DateRangeFilter
+                  timeZone={activeOrg?.timezone}
+                  value={{ range: (filters.range || "all") as WorkRange, from: filters.from ?? "", to: filters.to ?? "" }}
+                  onChange={(d) =>
+                    setFilters({ range: d.range === "all" ? "" : d.range, from: d.range === "custom" ? d.from : "", to: d.range === "custom" ? d.to : "" })
+                  }
+                />
               </div>
             </div>
 
