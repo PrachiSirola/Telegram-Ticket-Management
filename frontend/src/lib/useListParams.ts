@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useRef } from "react";
 import { useSearchParams, useLocation, type NavigateOptions, type URLSearchParamsInit } from "react-router-dom";
 
-/** Rows-per-page choices offered in the UI (the API accepts 1–100). */
 export const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 export const DEFAULT_PAGE_SIZE = 25;
 
@@ -12,7 +11,7 @@ function readStoredSize(): number | null {
     const n = Number(localStorage.getItem(SIZE_STORAGE_KEY));
     return (PAGE_SIZE_OPTIONS as readonly number[]).includes(n) ? n : null;
   } catch {
-    return null; // storage can be blocked/unavailable — it's only a convenience
+    return null; 
   }
 }
 
@@ -25,35 +24,26 @@ function writeStoredSize(n: number) {
 }
 
 interface Options {
-  /** URL param holding the page number. */
+
   pageKey?: string;
-  /** URL param holding rows-per-page. */
+
   sizeKey?: string;
-  /**
-   * Filters kept in the URL: param name → allowed values. Anything not in
-   * the allowed list (typo, stale link) is ignored rather than sent to the API.
-   */
+
   filters?: Record<string, readonly string[]>;
-  /**
-   * Extra filters whose value is a calendar date ("yyyy-mm-dd") rather than one
-   * of a fixed list. Anything that isn't a real date is ignored.
-   */
+
   dateKeys?: readonly string[];
+
+  textKeys?: readonly string[];
+
+  resetKeys?: readonly string[];
+
+  defaultPageSize?: number;
 }
 
-/**
- * Pagination + filter state for a list, stored in the URL query string so it
- * survives refresh, back/forward and shared links.
- *
- * - Changing a filter or the page size ALWAYS drops back to page 1, in the
- *   same URL update (no intermediate request for a page that may not exist).
- * - The chosen page size is remembered in localStorage and used as the
- *   default next time, and is preserved across filter changes.
- */
-export function useListParams({ pageKey = "page", sizeKey = "pageSize", filters = {}, dateKeys = [] }: Options = {}) {
+
+export function useListParams({ pageKey = "page", sizeKey = "pageSize", filters = {}, dateKeys = [], textKeys = [], resetKeys = [], defaultPageSize }: Options = {}) {
   const [params, setParamsRaw] = useSearchParams();
-  // setSearchParams navigates without the current router state, which would
-  // erase e.g. the "Back to <member>" context a page was opened with. Carry it over.
+
   const { state: routeState } = useLocation();
   const stateRef = useRef(routeState);
   stateRef.current = routeState;
@@ -73,12 +63,14 @@ export function useListParams({ pageKey = "page", sizeKey = "pageSize", filters 
   const pageSize = useMemo(() => {
     const n = Number(params.get(sizeKey));
     if ((PAGE_SIZE_OPTIONS as readonly number[]).includes(n)) return n;
-    return readStoredSize() ?? DEFAULT_PAGE_SIZE;
-  }, [params, sizeKey]);
+    return readStoredSize() ?? defaultPageSize ?? DEFAULT_PAGE_SIZE;
+  }, [params, sizeKey, defaultPageSize]);
 
-  // Stable identity for the filter spec so the memo below doesn't churn.
+
   const filterSpec = JSON.stringify(filters);
   const dateSpec = JSON.stringify(dateKeys);
+  const textSpec = JSON.stringify(textKeys);
+  const resetSpec = JSON.stringify(resetKeys);
   const filterValues = useMemo(() => {
     const spec = JSON.parse(filterSpec) as Record<string, string[]>;
     const out: Record<string, string> = {};
@@ -90,8 +82,15 @@ export function useListParams({ pageKey = "page", sizeKey = "pageSize", filters 
       const v = params.get(key) ?? "";
       out[key] = /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) ? v : "";
     }
+    for (const key of JSON.parse(textSpec) as string[]) out[key] = (params.get(key) ?? "").trim().slice(0, 200);
     return out;
-  }, [params, filterSpec, dateSpec]);
+  }, [params, filterSpec, dateSpec, textSpec]);
+
+
+  const dropPages = useCallback((n: URLSearchParams) => {
+    n.delete(pageKey);
+    for (const k of JSON.parse(resetSpec) as string[]) n.delete(k);
+  }, [pageKey, resetSpec]);
 
   const setPage = useCallback(
     (next: number, opts?: { replace?: boolean }) => {
@@ -114,14 +113,14 @@ export function useListParams({ pageKey = "page", sizeKey = "pageSize", filters 
       setParams(
         (prev) => {
           const n = new URLSearchParams(prev);
-          n.set(sizeKey, String(size)); // explicit, so it beats the stored default
-          n.delete(pageKey); // back to page 1
+          n.set(sizeKey, String(size)); 
+          dropPages(n); 
           return n;
         },
         { replace: true },
       );
     },
-    [setParams, sizeKey, pageKey],
+    [setParams, sizeKey, dropPages],
   );
 
   const setFilter = useCallback(
@@ -131,16 +130,16 @@ export function useListParams({ pageKey = "page", sizeKey = "pageSize", filters 
           const n = new URLSearchParams(prev);
           if (value) n.set(key, value);
           else n.delete(key);
-          n.delete(pageKey); // back to page 1; page size param is left alone
+          dropPages(n); 
           return n;
         },
         { replace: true },
       );
     },
-    [setParams, pageKey],
+    [setParams, dropPages],
   );
 
-  /** Set several filters in ONE URL update (used for a page's default view). */
+  
   const setFilters = useCallback(
     (values: Record<string, string>) => {
       setParams(
@@ -150,26 +149,42 @@ export function useListParams({ pageKey = "page", sizeKey = "pageSize", filters 
             if (value) n.set(key, value);
             else n.delete(key);
           }
-          n.delete(pageKey);
+          dropPages(n);
           return n;
         },
         { replace: true },
       );
     },
-    [setParams, pageKey],
+    [setParams, dropPages],
   );
 
   const clearFilters = useCallback(() => {
     setParams(
       (prev) => {
         const n = new URLSearchParams(prev);
-        for (const key of [...Object.keys(JSON.parse(filterSpec)), ...(JSON.parse(dateSpec) as string[])]) n.delete(key);
-        n.delete(pageKey);
+        for (const key of [...Object.keys(JSON.parse(filterSpec)), ...(JSON.parse(dateSpec) as string[]), ...(JSON.parse(textSpec) as string[])]) n.delete(key);
+        dropPages(n);
         return n;
       },
       { replace: true },
     );
-  }, [setParams, filterSpec, dateSpec, pageKey]);
+  }, [setParams, filterSpec, dateSpec, textSpec, dropPages]);
 
-  return { page, pageSize, filters: filterValues, setPage, setPageSize, setFilter, setFilters, clearFilters };
+  
+  const setParam = useCallback(
+    (key: string, value: string, opts?: { replace?: boolean }) => {
+      setParams(
+        (prev) => {
+          const n = new URLSearchParams(prev);
+          if (value) n.set(key, value);
+          else n.delete(key);
+          return n;
+        },
+        { replace: opts?.replace ?? false },
+      );
+    },
+    [setParams],
+  );
+
+  return { page, pageSize, filters: filterValues, setPage, setPageSize, setFilter, setFilters, clearFilters, setParam, params };
 }

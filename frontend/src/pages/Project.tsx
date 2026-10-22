@@ -33,6 +33,7 @@ import { todayStr } from "../lib/dateUtils";
 const STATUS_OPTS = ["OPEN", "IN_PROGRESS", "DONE"];
 const PRIORITY_OPTS = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 const TYPE_OPTS = ["BUG", "FEATURE", "TASK"];
+// "" (default) = active tickets only; the team can also look at archived ones.
 const ARCHIVED_OPTS = ["archived", "all"];
 const opt = (v: string) => ({ value: v, label: v.replace("_", " ") });
 
@@ -92,7 +93,7 @@ export default function Project() {
     const urlHasView = FILTER_KEYS.some((k) => urlParams.get(k)) || urlParams.has("page");
     if (!urlHasView) {
       const remembered = readProjectListMemory(activeOrgId, projectId);
-      const view = remembered === null ? "status=OPEN&range=today" : remembered;
+      const view = remembered === null ? "status=OPEN" : remembered; // Open tickets, All Time
       if (view !== "") {
         const saved = new URLSearchParams(view);
         const next = new URLSearchParams(urlParams);
@@ -102,7 +103,7 @@ export default function Project() {
           else next.delete(k);
         }
         pendingView.current = listQuery(next, FILTER_KEYS);
-        setUrlParams(next, { replace: true, state: routeState }); 
+        setUrlParams(next, { replace: true, state: routeState }); // ONE update, so nothing is lost
       }
     }
     setDefaultsFor(projectId);
@@ -113,7 +114,7 @@ export default function Project() {
   useEffect(() => {
     if (!projectId || !activeOrgId || defaultsFor !== projectId) return;
     if (pendingView.current !== null) {
-      if (currentQuery !== pendingView.current) return; 
+      if (currentQuery !== pendingView.current) return; // URL hasn't caught up yet
       pendingView.current = null;
     }
     writeProjectListMemory(activeOrgId, projectId, currentQuery);
@@ -217,6 +218,7 @@ export default function Project() {
               setShowForm(false);
               setUploadNotice(failed ?? null);
               qc.invalidateQueries({ queryKey: ["tickets", activeOrgId, projectId] });
+              // A new ticket changes the project's open count (Dashboard order).
               qc.invalidateQueries({ queryKey: ["projects"] });
             }}
           />
@@ -372,7 +374,7 @@ export default function Project() {
                       : ""
                   }`}
                 >
-
+                  {/* Avatar */}
                   {m.avatarUrl ? (
                     <img
                       src={m.avatarUrl}
@@ -385,18 +387,18 @@ export default function Project() {
                     </span>
                   )}
 
-
+                  {/* Name + Email */}
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-medium text-fg">{m.name}</div>
                     <div className="truncate text-[11px] text-muted">{m.email}</div>
                   </div>
 
-
+                  {/* Role */}
                   <span className="eyebrow shrink-0">
                     {m.role === "SUPER_ADMIN" ? "Owner" : m.role.toLowerCase()}
                   </span>
 
-
+                  {/* Delete icon only for Developer / Client */}
                   {removable && (
                     <button
                       type="button"
@@ -532,6 +534,11 @@ function AddMemberModal({
               onChange={(e) => setQuery(e.target.value)}
             />
           )}
+          {/* Inline checklist, not a floating dropdown — a floating menu
+              would overlay the Cancel/Add buttons below it and, being
+              multi-select, never auto-closes after a pick. This scrolls
+              within its own fixed height instead, so the buttons always
+              stay visible and in normal document flow. */}
           <div className="max-h-56 overflow-y-auto rounded-xl border border-line">
             {visibleCandidates.length === 0 ? (
               <div className="px-3 py-3 text-sm text-muted">No matches</div>
@@ -625,6 +632,7 @@ function NewTicketForm({
   const [percent, setPercent] = useState(0);
   const [phase, setPhase] = useState<"ticket" | "files">("ticket");
 
+  // Only members of this project can be assigned.
   const { data: assignableData } = useQuery({
     queryKey: ["assignable", orgId, projectId],
     queryFn: () => api.assignableMembers(orgId, projectId),

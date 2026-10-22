@@ -16,7 +16,9 @@ import {
   IconAlertTriangle,
   IconClock,
 } from "../components/Icons";
-import { DateRangeFilter, type DateRangeValue } from "../components/DateRangeFilter";
+import { DateRangeFilter, DATE_RANGE_URL_VALUES, type DateRangeValue } from "../components/DateRangeFilter";
+import { useListParams } from "../lib/useListParams";
+import { useListViewMemory } from "../lib/useListViewMemory";
 import type { AssignmentInfo, CompletedTicket, TicketPriority, WorkStatusFilter, WorkTicket } from "../types";
 
 const DEFAULT_PAGE_SIZE = 10; // same page sizes as every other ticket table (10 / 25 / 50 / 100)
@@ -36,31 +38,72 @@ const PRIORITY_OPTIONS = [
 
 export default function MyWork() {
   const { activeOrgId, activeOrg } = useOrg();
+  const { me } = useAuth();
   const timeZone = activeOrg?.timezone;
 
-  const [dates, setDates] = useState<DateRangeValue>({ range: "all", from: "", to: "" });
-  const { range, from: customFrom, to: customTo } = dates;
-  // Default view: Open tickets only. Cards (and the API's `status`) change it; deselecting a card returns here.
+  // Everything the user picks lives in the URL (and is remembered for the browser session), so opening a ticket
+  // and coming back — or leaving through the sidebar and returning — shows the same view.
+  const {
+    filters,
+    page,
+    pageSize,
+    setFilter,
+    setFilters,
+    setPage,
+    setPageSize,
+    setParam,
+    params: urlParams,
+  } = useListParams({
+    filters: {
+      status: ["in_progress", "completed", "overdue"],
+      priority: ["LOW", "MEDIUM", "HIGH", "URGENT"],
+      range: DATE_RANGE_URL_VALUES,
+    },
+    dateKeys: ["from", "to"],
+    textKeys: ["project", "by", "q"],
+    resetKeys: ["cpage"],
+    defaultPageSize: DEFAULT_PAGE_SIZE,
+  });
+  const viewReady = useListViewMemory({
+    scope: "mywork",
+    orgId: me ? activeOrgId : "", // remembered per person, so wait until we know who it is
+    id: me?.id,
+    keys: ["page", "status", "priority", "range", "from", "to", "project", "by", "q", "cpage"],
+  });
+  const completedPage = Math.max(1, parseInt(urlParams.get("cpage") ?? "", 10) || 1);
+  const setCompletedPage = (n: number) => setParam("cpage", n <= 1 ? "" : String(n), { replace: true });
+
+  // Default view: Open tickets, All Time. Cards (and the API's `status`) change it; deselecting a card returns here.
   const DEFAULT_STATUS: WorkStatusFilter = "pending";
-  const [status, setStatus] = useState<WorkStatusFilter>(DEFAULT_STATUS);
-  const [priority, setPriority] = useState<TicketPriority | "">("");
-  const [projectId, setProjectId] = useState("");
-  const [assignedBy, setAssignedBy] = useState("");
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [page, setPage] = useState(1);
-  const [completedPage, setCompletedPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const status = (filters.status || DEFAULT_STATUS) as WorkStatusFilter;
+  const setStatus = (next: WorkStatusFilter) => setFilters({ status: next === DEFAULT_STATUS ? "" : next });
+  const dates: DateRangeValue = { range: (filters.range || "all") as DateRangeValue["range"], from: filters.from ?? "", to: filters.to ?? "" };
+  const setDates = (d: DateRangeValue) =>
+    setFilters({ range: d.range === "all" ? "" : d.range, from: d.range === "custom" ? d.from : "", to: d.range === "custom" ? d.to : "" });
+  const { range, from: customFrom, to: customTo } = dates;
+  const priority = (filters.priority || "") as TicketPriority | "";
+  const projectId = filters.project ?? "";
+  const assignedBy = filters.by ?? "";
+  const debouncedSearch = filters.q ?? "";
 
+  // The search box edits local text right away and writes it to the URL a moment later.
+  const [search, setSearch] = useState(debouncedSearch);
+  const lastSent = useRef(debouncedSearch);
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    if (search.trim() === lastSent.current) return;
+    const t = setTimeout(() => {
+      lastSent.current = search.trim();
+      setFilter("q", lastSent.current);
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
-
+  }, [search, setFilter]);
+  // The URL changed by itself (remembered view restored, filters cleared): show it in the box.
   useEffect(() => {
-    setPage(1);
-    setCompletedPage(1);
-  }, [range, customFrom, customTo, status, priority, projectId, assignedBy, debouncedSearch, pageSize]);
+    if (debouncedSearch !== lastSent.current) {
+      lastSent.current = debouncedSearch;
+      setSearch(debouncedSearch);
+    }
+  }, [debouncedSearch]);
 
   const { data: projects } = useQuery({
     queryKey: ["projects", activeOrgId],
@@ -98,7 +141,7 @@ export default function MyWork() {
         completedPage,
         completedPageSize: pageSize,
       }),
-    enabled: !!activeOrgId,
+    enabled: !!activeOrgId && viewReady,
     // Keep the current rows (dimmed) while the next page loads instead of flashing a skeleton.
     placeholderData: keepPreviousData,
   });
@@ -111,11 +154,10 @@ export default function MyWork() {
   useEffect(() => {
     if (!data || isPlaceholderData) return;
     const last = (t: number, size: number) => Math.max(1, Math.ceil(t / size));
-    if (data.work.total > 0 && page > last(data.work.total, data.work.pageSize)) setPage(last(data.work.total, data.work.pageSize));
+    if (data.work.total > 0 && page > last(data.work.total, data.work.pageSize)) setPage(last(data.work.total, data.work.pageSize), { replace: true });
     if (data.completedWork.total > 0 && completedPage > last(data.completedWork.total, data.completedWork.pageSize))
       setCompletedPage(last(data.completedWork.total, data.completedWork.pageSize));
   }, [data, isPlaceholderData, page, completedPage]);
-  const { me } = useAuth();
   const canBulk = isInternalIn(me, activeOrgId);
   const toItems = (l?: { id: string; title: string }[]) => (canBulk ? l?.map((t) => ({ id: t.id, title: t.title })) : undefined);
   const workBulk = useBulkSelect(toItems(work?.items));
@@ -159,7 +201,7 @@ export default function MyWork() {
           size="sm"
           placeholder="All priorities"
           value={priority}
-          onChange={(v) => setPriority(v as TicketPriority | "")}
+          onChange={(v) => setFilter("priority", v)}
           options={PRIORITY_OPTIONS}
         />
         <Dropdown
@@ -169,7 +211,7 @@ export default function MyWork() {
           searchable
           searchPlaceholder="Search projects…"
           value={projectId}
-          onChange={setProjectId}
+          onChange={(v) => setFilter("project", v)}
           options={[
             { value: "", label: "All projects" },
             ...(projects ?? []).map((p) => ({ value: p.id, label: p.name })),
@@ -183,7 +225,7 @@ export default function MyWork() {
           searchable
           searchPlaceholder="Search people…"
           value={assignedBy}
-          onChange={setAssignedBy}
+          onChange={(v) => setFilter("by", v)}
           options={assignerOptions}
         />
         <div className="relative min-w-[200px] flex-1 sm:max-w-[260px] sm:flex-none">

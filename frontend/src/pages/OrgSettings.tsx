@@ -142,7 +142,7 @@ function Settings({ orgId, sa }: { orgId: string; sa: boolean }) {
                 options={timezoneOptions(timezone)}
               />
               <p className="mt-1 text-xs text-fg-soft">
-                Decides what "today" means for due-date views, such as a project's default Today list.
+                Decides what "today" means in the due-date filters (Today, Last 3 Days, and so on).
               </p>
             </div>
           )}

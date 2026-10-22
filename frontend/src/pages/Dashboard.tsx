@@ -18,6 +18,7 @@ import {
 import { Pagination } from "../components/Pagination";
 import { TablePagination } from "../components/TablePagination";
 import { useListParams } from "../lib/useListParams";
+import { useListViewMemory } from "../lib/useListViewMemory";
 import {
   IconFolder,
   IconPlus,
@@ -135,6 +136,13 @@ export default function Dashboard() {
     },
     dateKeys: ["tfrom", "tto"],
   });
+
+  const viewReady = useListViewMemory({
+    scope: "dashboard",
+    orgId: me ? activeOrgId : "", // remembered per person, so wait until we know who it is
+    id: me?.id,
+    keys: ["tpage", "tview", "tstatus", "tpriority", "trange", "tfrom", "tto"],
+  });
   const filter = (filters.tview || "assigned") as "assigned" | "reported";
   const statusSel = filters.tstatus || "OPEN"; // what the dropdown shows
   const apiStatus = statusSel === "ALL" ? undefined : (statusSel as TicketStatus);
@@ -159,7 +167,7 @@ export default function Dashboard() {
     queryKey: ["myTickets", activeOrgId, filter, page, pageSize, apiStatus ?? "ALL", prioritySel ?? "", dueRange, dueFrom ?? "", dueTo ?? ""],
     queryFn: () =>
       api.myTicketsPaged(activeOrgId, filter, { page, pageSize, status: apiStatus, priority: prioritySel, range: dueRange === "all" ? undefined : dueRange, from: dueFrom, to: dueTo }),
-    enabled: !!activeOrgId,
+    enabled: !!activeOrgId && viewReady,
     placeholderData: (prev, prevQuery) =>
       prevQuery?.queryKey[1] === activeOrgId && prevQuery?.queryKey[2] === filter ? prev : undefined,
   });
@@ -398,10 +406,10 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
   });
   const projects = paged?.items;
   const bulk = useBulkSelect(canManage ? projects?.map((p) => ({ id: p.id, title: p.name })) : undefined);
-  // Switching tab / search changes which actions apply, so start a fresh selection.
+
   useEffect(() => {
     bulk.clear();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [tab, debouncedSearch]);
 
   function selectTab(next: ProjectStatusFilter) {
@@ -520,7 +528,7 @@ function ProjectsSection({ orgId, canManage }: { orgId: string; canManage: boole
                 to={`/projects/${p.id}`}
                 className="block p-5"
                 onClick={(e) => {
-                  // In select mode a click picks the card instead of opening it.
+
                   if (bulk.active) {
                     e.preventDefault();
                     bulk.toggle(p.id);

@@ -22,7 +22,7 @@ const TYPE_OPTS = ["BUG", "FEATURE", "TASK"];
 
 const FILTER_KEYS = ["status", "priority", "type", "range", "from", "to"];
 
-const DEFAULT_VIEW = "status=OPEN&range=today";
+const DEFAULT_VIEW = "status=OPEN";
 const opt = (v: string) => ({ value: v, label: v.replace("_", " ") });
 
 export default function MemberDetail() {
@@ -118,9 +118,8 @@ export default function MemberDetail() {
 
   const here = backState({ path: `${location.pathname}${location.search}`, label: detail?.name ?? "member" });
 
-
   function showTickets(status: string) {
-
+   
     setFilters({ status, priority: "", type: "", range: "", from: "", to: "" });
     window.setTimeout(() => listTop.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   }
